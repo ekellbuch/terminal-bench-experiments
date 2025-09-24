@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import matplotlib
+from typing import Iterable
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -30,14 +31,34 @@ from util_scores import connect_to_database, get_model_task_scores, filter_descr
 from name_remapping import model_names, agent_name_map
 
 
-def create_agent_model_heatmap(df, output_path, trial_filter="with_timeouts"):
+def save_figure_in_formats(base_path: Path, formats: Iterable[str], **savefig_kwargs):
+    """Save the current matplotlib figure to each requested format."""
+    saved_paths = []
+    normalized_formats = []
+    for fmt in formats:
+        if not fmt:
+            continue
+        normalized_formats.append(fmt.lower())
+    if not normalized_formats:
+        raise ValueError("At least one output format must be provided.")
+
+    for fmt in normalized_formats:
+        target_path = base_path.with_suffix(f".{fmt}")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(target_path, format=fmt, **savefig_kwargs)
+        saved_paths.append(target_path)
+    return saved_paths
+
+
+def create_agent_model_heatmap(df, output_base_path, trial_filter="with_timeouts", output_formats=("svg",)):
     """
     Create a heatmap showing model performance across different agents (transposed).
     
     Args:
         df: DataFrame with columns [agent_name, model_name, task_name, avg_reward]
-        output_path: Path to save the heatmap image
+        output_base_path: Base path to save the heatmap image (extension added per format)
         trial_filter: Trial filtering mode for title display
+        output_formats: Iterable of output formats to generate (e.g., ("svg", "pdf"))
     """
     print("\n" + "="*80)
     print("Creating model vs agent performance heatmap (transposed)...")
@@ -130,8 +151,15 @@ def create_agent_model_heatmap(df, output_path, trial_filter="with_timeouts"):
     plt.yticks(fontsize=14)
 
     # Save the figure with publication quality DPI and padding
-    plt.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.2)
-    print(f"Agent-Model heatmap saved to: {output_path}")
+    saved_paths = save_figure_in_formats(
+        output_base_path,
+        output_formats,
+        dpi=300,
+        bbox_inches='tight',
+        pad_inches=0.2
+    )
+    for path in saved_paths:
+        print(f"Agent-Model heatmap saved to: {path}")
     
     # Print insights
     print("\nModel-Agent Performance Insights:")
@@ -154,15 +182,22 @@ def create_agent_model_heatmap(df, output_path, trial_filter="with_timeouts"):
     return True
 
 
-def create_model_task_heatmap(df, output_path, trial_filter="with_timeouts", specific_agent=None):
+def create_model_task_heatmap(
+    df,
+    output_base_path,
+    trial_filter="with_timeouts",
+    specific_agent=None,
+    output_formats=("svg",)
+):
     """
     Create a heatmap showing task performance across models (tasks x models matrix - transposed).
     
     Args:
         df: DataFrame with columns [agent_name, model_name, task_name, avg_reward]
-        output_path: Path to save the heatmap image
+        output_base_path: Base path to save the heatmap image (extension added per format)
         trial_filter: Trial filtering mode for title display
         specific_agent: If provided, only include data for this agent
+        output_formats: Iterable of output formats to generate (e.g., ("svg", "pdf"))
     """
     print("\n" + "="*80)
     if specific_agent:
@@ -267,8 +302,15 @@ def create_model_task_heatmap(df, output_path, trial_filter="with_timeouts", spe
     plt.yticks(fontsize=12)
 
     # Save the figure with publication quality DPI and padding
-    plt.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.2)
-    print(f"Model-Task heatmap saved to: {output_path}")
+    saved_paths = save_figure_in_formats(
+        output_base_path,
+        output_formats,
+        dpi=300,
+        bbox_inches='tight',
+        pad_inches=0.2
+    )
+    for path in saved_paths:
+        print(f"Model-Task heatmap saved to: {path}")
     
     # Print insights
     print("\nTask-Model Performance Insights:")
@@ -287,14 +329,15 @@ def create_model_task_heatmap(df, output_path, trial_filter="with_timeouts", spe
     return True
 
 
-def create_trial_count_heatmap(df, output_path, trial_filter="with_timeouts"):
+def create_trial_count_heatmap(df, output_base_path, trial_filter="with_timeouts", output_formats=("svg",)):
     """
     Create a heatmap showing number of trials per task per agent/model combination.
     
     Args:
         df: DataFrame with columns [agent_name, model_name, task_name, num_trials]
-        output_path: Path to save the heatmap image
+        output_base_path: Base path to save the heatmap image (extension added per format)
         trial_filter: Trial filtering mode for title display
+        output_formats: Iterable of output formats to generate (e.g., ("svg", "pdf"))
     """
     print("\n" + "="*80)
     print("Creating trial count heatmap...")
@@ -384,8 +427,15 @@ def create_trial_count_heatmap(df, output_path, trial_filter="with_timeouts"):
     plt.yticks(fontsize=9)
 
     # Save the figure with padding
-    plt.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.2)
-    print(f"Trial count heatmap saved to: {output_path}")
+    saved_paths = save_figure_in_formats(
+        output_base_path,
+        output_formats,
+        dpi=300,
+        bbox_inches='tight',
+        pad_inches=0.2
+    )
+    for path in saved_paths:
+        print(f"Trial count heatmap saved to: {path}")
     
     # Print insights
     print("\nTrial Count Insights:")
@@ -427,6 +477,11 @@ def main():
                         'with_timeouts' (completed + timeouts), \
                         'with_all_exceptions' (all), \
                         'only_timeouts' (only timeouts) (default: with_timeouts)")
+    parser.add_argument(
+        "--output-format",
+        default="svg",
+        help="Comma-separated list of output formats to generate (choices: png, svg, pdf; default: svg)"
+    )
     # Always produces two heatmaps:
     #   1. Agent x Model performance matrix
     #   2. Model x Task performance matrix
@@ -438,6 +493,25 @@ def main():
     agent_name = args.agent_name
     model_name = args.model_name
     trial_filter = args.trial_filter
+    raw_output_formats = [fmt.strip() for fmt in args.output_format.split(',')]
+    output_formats = [fmt.lower() for fmt in raw_output_formats if fmt]
+
+    if not output_formats:
+        parser.error("At least one valid output format must be provided via --output-format.")
+
+    allowed_formats = {"png", "svg", "pdf"}
+    invalid_formats = [fmt for fmt in output_formats if fmt not in allowed_formats]
+    if invalid_formats:
+        parser.error(f"Unsupported output format(s): {', '.join(invalid_formats)}")
+
+    # Remove duplicates while preserving order
+    seen_formats = set()
+    normalized_output_formats = []
+    for fmt in output_formats:
+        if fmt not in seen_formats:
+            normalized_output_formats.append(fmt)
+            seen_formats.add(fmt)
+    output_formats = tuple(normalized_output_formats)
     
     print("Terminal Bench Task Scores Heatmap Generator")
     print("=" * 80)
@@ -446,6 +520,7 @@ def main():
         print(f"Agent filter: {agent_name}")
     if model_name:
         print(f"Model filter: {model_name}")
+    print(f"Output formats: {', '.join(output_formats)}")
     print("=" * 80)
     
     # Connect to database
@@ -481,30 +556,57 @@ def main():
             filename_suffix = filter_suffix_map.get(trial_filter, f"_{trial_filter}")
             
             # 1. Create model x agent heatmap (transposed)
-            model_agent_path = output_dir / f"model_agent_performance{filename_suffix}.png"
-            create_agent_model_heatmap(df, model_agent_path, trial_filter)
+            model_agent_base_path = output_dir / f"model_agent_performance{filename_suffix}"
+            create_agent_model_heatmap(
+                df,
+                model_agent_base_path,
+                trial_filter,
+                output_formats=output_formats
+            )
             
             # 2. Create task x model heatmap (transposed, aggregated across all agents)
-            task_model_path = output_dir / f"task_model_performance{filename_suffix}.png"
-            create_model_task_heatmap(df, task_model_path, trial_filter)
+            task_model_base_path = output_dir / f"task_model_performance{filename_suffix}"
+            create_model_task_heatmap(
+                df,
+                task_model_base_path,
+                trial_filter,
+                output_formats=output_formats
+            )
             
             # 3. Create individual task x model heatmaps for each agent (transposed)
             if not agent_name:  # Only create per-agent heatmaps if no specific agent was requested
                 unique_agents = df['agent_name'].unique()
                 print(f"\nCreating individual task-model heatmaps for {len(unique_agents)} agents...")
                 for agent in sorted(unique_agents):
-                    agent_task_model_path = output_dir / f"task_model_performance_{agent}{filename_suffix}.png"
+                    agent_task_model_base = output_dir / f"task_model_performance_{agent}{filename_suffix}"
                     print(f"  - Creating heatmap for {agent}...")
-                    create_model_task_heatmap(df, agent_task_model_path, trial_filter, specific_agent=agent)
+                    create_model_task_heatmap(
+                        df,
+                        agent_task_model_base,
+                        trial_filter,
+                        specific_agent=agent,
+                        output_formats=output_formats
+                    )
             elif agent_name:
                 # If specific agent requested, also create that agent's individual heatmap
-                agent_task_model_path = output_dir / f"task_model_performance_{agent_name}{filename_suffix}.png"
+                agent_task_model_base = output_dir / f"task_model_performance_{agent_name}{filename_suffix}"
                 print(f"\nCreating individual task-model heatmap for {agent_name}...")
-                create_model_task_heatmap(df, agent_task_model_path, trial_filter, specific_agent=agent_name)
+                create_model_task_heatmap(
+                    df,
+                    agent_task_model_base,
+                    trial_filter,
+                    specific_agent=agent_name,
+                    output_formats=output_formats
+                )
             
             # 4. Create trial count heatmap
-            trial_count_path = output_dir / f"trial_counts{filename_suffix}.png"
-            create_trial_count_heatmap(df, trial_count_path, trial_filter)
+            trial_count_base_path = output_dir / f"trial_counts{filename_suffix}"
+            create_trial_count_heatmap(
+                df,
+                trial_count_base_path,
+                trial_filter,
+                output_formats=output_formats
+            )
             
             print("\n" + "="*80)
             print("Heatmap generation complete!")
