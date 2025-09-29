@@ -1,4 +1,4 @@
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import os
 from pathlib import Path
 import json
@@ -277,14 +277,12 @@ def make_mast_prompt(trace: str, task_description: str, definitions: Optional[st
         "1.3 no \n"
         "1.4 no \n"
         "1.5 no \n"
-        "1.6 yes \n"
         "2.1 no \n"
         "2.2 no \n"
         "2.3 yes \n"
         "2.4 no \n"
         "2.5 no \n"
         "2.6 yes \n"
-        "2.7 no \n"
         "3.1 no \n"
         "3.2 yes \n"
         "3.3 no \n"   
@@ -327,13 +325,20 @@ def parse_response_base(response: str) -> Dict[str, any]:
     assert all(key in OUTPUT_MODE_RUBRIC['failure_modes'].keys() for key in failure_modes.keys()), "Failure modes must match the OUTPUT_MODE_RUBRIC"
     return failure_modes
 
-def parse_response_mast(response: str) -> Dict[str, any]:
+def parse_response_mast(response: str) -> Tuple[Dict[str, any], str]:
+    """Parse MAST response to extract scores and full analysis text.
+    
+    Returns:
+        Tuple of (failure_modes_dict, full_analysis_text)
+        where failure_modes_dict contains scores for each mode
+        and full_analysis_text contains the complete A, B, C sections
+    """
     try:
-        failure_modes = {
-            '1.1': [], '1.2': [], '1.3': [], '1.4': [], '1.5': [],
-            '2.1': [], '2.2': [], '2.3': [], '2.4': [], '2.5': [], '2.6': [],
-            '3.1': [], '3.2': [], '3.3': []
-        }
+        # Initialize failure modes dict
+        failure_modes = {}
+        mode_list = ['1.1', '1.2', '1.3', '1.4', '1.5',
+                     '2.1', '2.2', '2.3', '2.4', '2.5', '2.6',
+                     '3.1', '3.2', '3.3']
         
         # Clean up the response - remove @@ markers if present
         cleaned_response = response.strip()
@@ -342,8 +347,11 @@ def parse_response_mast(response: str) -> Dict[str, any]:
         if cleaned_response.endswith('@@'):
             cleaned_response = cleaned_response[:-2]
         
-        # Process each failure mode
-        for mode in failure_modes.keys():
+        # Store the full cleaned response as the analysis text
+        full_analysis = cleaned_response.strip()
+        
+        # Process each failure mode to extract scores
+        for mode in mode_list:
             # Various patterns to match different response formats
             patterns = [
                 # Format with C. prefix and colon
@@ -360,32 +368,41 @@ def parse_response_mast(response: str) -> Dict[str, any]:
             ]
             
             found = False
+            score = 0
+            
             for pattern in patterns:
                 matches = re.findall(pattern, cleaned_response, re.IGNORECASE | re.DOTALL)
                 if matches:
                     # Use the first match
-                    value = 1 if matches[0].lower() == 'yes' else 0
-                    failure_modes[mode].append(value)
+                    score = 1 if matches[0].lower() == 'yes' else 0
                     found = True
                     break
             
             if not found:
                 # If we still can't find a match, try a more general approach
-                # Look for the mode number followed by any text and then yes/no
                 general_pattern = rf"(?:C\.)?{mode}.*?(yes|no)"
                 match = re.search(general_pattern, cleaned_response, re.IGNORECASE | re.DOTALL)
                 
                 if match:
-                    value = 1 if match.group(1).lower() == 'yes' else 0
-                    failure_modes[mode].append(value)
-                else:
-                    # If all attempts fail, default to 'no'
-                    print(f"Warning: Could not find mode {mode} in response {i}")
-                    failure_modes[mode].append(0)
+                    score = 1 if match.group(1).lower() == 'yes' else 0
+                    found = True
+                    
+            if not found:
+                # If all attempts fail, default to 'no'
+                print(f"Warning: Could not find mode {mode} in response")
+                score = 0
+            
+            # Store just the score for backward compatibility
+            # Evidence and required_skill are now in the full_analysis text
+            failure_modes[mode] = {
+                'score': float(score),
+                'evidence': '',  # Will be extracted from full_analysis when needed
+                'required_skill': ''  # Will be extracted from full_analysis when needed
+            }
 
     except Exception as e:
         raise ValueError(f"Error parsing response: {e}")
-    return failure_modes
+    return failure_modes, full_analysis
 
 
 def parse_response_timeout(response: str) -> Dict[str, Any]:

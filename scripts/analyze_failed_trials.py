@@ -76,7 +76,8 @@ def process_single_trial(
     classifier, 
     trial_id: str, 
     results_lock: threading.Lock, 
-    results: Dict[str, Any]
+    results: Dict[str, Any],
+    failure_prompt_type: str = 'mast'
 ) -> Dict[str, Any]:
     """Process a single trial with the classifier."""
     try:
@@ -92,14 +93,24 @@ def process_single_trial(
             return {"trial_id": trial_id, "status": "error", "reason": "empty_trace"}
         
         # Classify the failure - use trial_id as task name since we don't have task groupings
-        failure_modes = classifier.process_trace(trace_text, trial_id)
+        result = classifier.process_trace(trace_text, trial_id)
+        
+        # Handle different return formats based on prompt type
+        if failure_prompt_type == 'mast' and isinstance(result, tuple):
+            failure_modes, full_analysis = result
+        else:
+            failure_modes = result
+            full_analysis = None
         
         # Store result (thread-safe)
         with results_lock:
-            results["trials"][trial_id] = {
+            trial_data = {
                 "failure_modes": failure_modes,
                 "trace_length": len(trace_text)
             }
+            if full_analysis:
+                trial_data["full_analysis"] = full_analysis
+            results["trials"][trial_id] = trial_data
         
         return {"trial_id": trial_id, "status": "success", "trace_length": len(trace_text)}
         
@@ -156,7 +167,8 @@ def analyze_task_ids(
                 classifier, 
                 trial_id, 
                 results_lock, 
-                results
+                results,
+                failure_prompt_type
             ): trial_id
             for trial_id in task_ids
         }
@@ -364,13 +376,14 @@ def save_results_to_database(results: Dict[str, Any], judge_name: str, args: Ana
         if 'failure_modes' in trial_data:
             failure_modes_dict = format_failure_modes(trial_data['failure_modes'])
             
-            # Store successful result
+            # Store successful result with full analysis if available
             db.store_judgment_result(
                 trial_id=trial_id,
                 failure_classifier=args.failure_classifier,
                 judge_model=judge_name,
                 failure_prompt_type=args.classifier_config.failure_prompt_type,
                 failure_modes=failure_modes_dict,
+                failure_mode_analysis=trial_data.get('full_analysis', ''),
                 trace_length=trial_data.get('trace_length')
             )
         elif 'error' in trial_data:
@@ -392,20 +405,31 @@ def format_failure_modes(raw_failure_modes) -> Dict[str, Dict[str, Any]]:
     """Format failure modes to the expected database format."""
     failure_modes_dict = {}
     
-    # Handle the format from parse_response_mast (dict with lists)
+    # Handle the format from parse_response_mast (dict with dicts or lists)
     if isinstance(raw_failure_modes, dict):
         for mode, value in raw_failure_modes.items():
-            # If value is a list, take the first element as score
-            if isinstance(value, list):
+            # Check if value is already a dict with score, evidence, required_skill
+            if isinstance(value, dict):
+                failure_modes_dict[mode] = {
+                    'score': float(value.get('score', 0)),
+                    'evidence': value.get('evidence', ''),
+                    'required_skill': value.get('required_skill', '')
+                }
+            # If value is a list, take the first element as score (backward compatibility)
+            elif isinstance(value, list):
                 score = value[0] if value else 0
+                failure_modes_dict[mode] = {
+                    'score': float(score),
+                    'evidence': '',
+                    'required_skill': ''
+                }
             else:
-                score = value
-            
-            failure_modes_dict[mode] = {
-                'score': float(score),
-                'evidence': '',  # Can be populated later if needed
-                'required_skill': ''  # Can be populated later if needed
-            }
+                # If value is a scalar, use it as score
+                failure_modes_dict[mode] = {
+                    'score': float(value),
+                    'evidence': '',
+                    'required_skill': ''
+                }
     else:
         # If it's already in the right format, use it as is
         failure_modes_dict = raw_failure_modes
@@ -420,7 +444,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config-file", 
         help="Configuration file", 
-        default="config/failures.yaml"
+        default="config/failure_debug.yaml"
     )
     args = parser.parse_args()
     

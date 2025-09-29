@@ -111,7 +111,7 @@ class FailureAnalyzerJudge(FailureProcessor):
 
     def _get_model_provider(self) -> str:
         """Get the model provider."""
-        if self.model_name in ["gpt-4o", "gpt-4o-mini", "gpt-5", "gpt-5-nano"]:
+        if self.model_name in ["gpt-4o", "gpt-4o-mini", "gpt-5", "gpt-5-nano", "o1", "o1-mini", "o1-preview"]:
             return "openai"
         elif self.model_name in ["claude-3-haiku-20240307", "claude-3-5-sonnet-20241022", "claude-opus-4-1-20250805"]:
             return "anthropic"
@@ -124,6 +124,7 @@ class FailureAnalyzerJudge(FailureProcessor):
             response = self.client.messages.create(
                 model=self.model_name,
                 temperature=0,
+                #max_tokens=8192,
                 messages=[{"role": "user", "content": prompt}]
             )
             return response.content[0].text
@@ -140,15 +141,18 @@ class FailureAnalyzerJudge(FailureProcessor):
         else:
             raise ValueError(f"Unsupported LLM provider: {self.llm_provider}")
 
-    def _parse_response(self, response: str) -> Dict[str, any]:
-        """Parse the response JSON from the LLM."""
+    def _parse_response(self, response: str):
+        """Parse the response from the LLM.
+        
+        Returns:
+            For mast: Tuple of (failure_modes, full_analysis)
+            For others: Just failure_modes dict
+        """
         parse_response_function = PARSE_RESPONSE_FUNCTIONS[self.failure_prompt_type]
         return parse_response_function(response)
 
-        return failure_modes
 
-
-    def process_trace(self, trace: str, task_description: str = "") -> List[Dict[str, any]]:
+    def process_trace(self, trace: str, task_description: str = ""):
         """
         Classify a failure trace into one or more failure modes using LLM.
         
@@ -157,14 +161,15 @@ class FailureAnalyzerJudge(FailureProcessor):
             task_description: Optional description of what the task was supposed to do
             
         Returns:
-            List of failure mode classifications with evidence and confidence
+            For mast: Tuple of (failure_modes, full_analysis)
+            For others: Just failure_modes dict
         """
         # Build the classification prompt
         prompt = self._prepare_text(trace, task_description)
         response_json = self._get_response(prompt)
 
-        failure_modes = self._parse_response(response_json)
-        return failure_modes
+        result = self._parse_response(response_json)
+        return result
 
     
     def _prepare_text(self, trace: str, task_description: Optional[str] = None) -> str:
@@ -305,9 +310,9 @@ if __name__ == "__main__":
     # Example usage
     parser = TraceParser(BASE_DIR / "traces")
     
-    trial_id = "0d4d39d9-e67d-4610-8785-bab0ddbb2d81"
+    trial_id = "57141c5b-894c-4a75-8e4f-067bda64fd7d"
     failure_classifier = "judge"
-    model_name="gpt-4o"
+    model_name="gpt-5"
     # Read the trace
     trace = parser.parse_trace(trial_id)
     trace_text = trace.to_text(include_metadata=False)
@@ -317,7 +322,13 @@ if __name__ == "__main__":
     # Print classification prompt:
     prompt = classifier._prepare_text(trace_text, trace.get_task_name())
 
-    print(prompt, flush=True)
+    # write prompt to file: `$TBENCH/prompts/failure_classifier_prompt.txt`
+    prompt_path = BASE_DIR / "prompts" / "failure_classifier_prompt" / f"{trial_id}.txt"
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)  # ensure dir exists
+    with open(prompt_path, "w") as f:
+        f.write(prompt)
+
+    #print(prompt, flush=True)
     failure_modes = classifier.process_trace(trace_text, trace.get_task_name())
 
     print(failure_modes, flush=True)
