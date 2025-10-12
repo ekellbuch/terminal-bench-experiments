@@ -1,0 +1,57 @@
+1. Execution Failures
+
+1.1 Disobey Specification
+The agent performs actions that violate explicit task instructions, constraints, or required formats.
+This includes running forbidden or irrelevant commands, modifying unintended files, producing output in an incorrect or incomplete format, or ignoring clearly specified limits or conditions.
+Evidence: Look for concrete deviations from the specification — e.g. use of banned tools, incorrect output schema, missing required fields, or commands that target the wrong directory or file.
+Focus: Wrong action choice or format despite clear specification.
+
+
+1.2 Step Repetition
+This failure occurs when the agent unnecessarily repeats a phase, task, or operation that has already been completed or failed, indicating inefficient workflow or poor state tracking.
+Evidence: Executes identical or near-identical commands multiple times, reinstalls packages already installed, or repeats the same reasoning or analysis without incorporating new information.
+Focus: Redundant actions that reflect inadequate context awareness or looped behavior.
+
+1.3 Unaware of Termination Conditions
+The agent fails to stop after completing the task or stops prematurely before success.
+Evidence: Continues running commands after success confirmation, or halts before finalizing or verifying results.
+Focus: Improper stopping behavior — overshooting or undershooting completion.
+
+
+2. Communication Failures
+
+2.1 Context Loss
+The agent forgets, resets, or contradicts prior state or dialogue context, leading to inconsistency.
+Evidence: Re-asks for information, repeats earlier steps, or ignores results from prior turns.
+Focus: Memory or continuity failure across interaction steps.
+
+
+2.2. Information Withholding:
+The agent possesses relevant information but fails to communicate or use it where needed.
+Evidence: One component discovers key data (e.g., file path, result, error message) but never shares it with another that requires it, leading to redundant or incorrect work.
+Focus: Missed information flow between reasoning units or agents.
+
+
+2.3 Reasoning–Action Mismatch
+The agent’s reasoning or stated plan contradicts its actions or outputs.
+Evidence: States intention to do X but performs Y, claims success when failure remains, or outputs results inconsistent with prior logic.
+Focus: Discrepancy between internal reasoning and external behavior.
+
+
+3. Verification Failures
+
+3.1 Premature Termination
+This failure occurs when the agent ends a task, dialogue, or interaction before confirming that all objectives have been met or all necessary information has been exchanged.
+Evidence: Ends without saving outputs, confirming success, or performing expected post-checks.
+Focus: Stops too early; incomplete execution or validation.
+
+3.2 Weak Verification
+Verification is present but superficial or incomplete.
+Evidence: Performs only partial checks (e.g., syntax but not runtime), skips important cases, or validates too narrowly.
+Focus: Shallow or insufficient verification coverage.
+
+
+3.3 No or Incorrect Verification
+The agent omits verification entirely or verifies the wrong thing.
+Evidence: Declares success without testing, or validates irrelevant components.
+Focus: Absence or misapplication of correctness checks.

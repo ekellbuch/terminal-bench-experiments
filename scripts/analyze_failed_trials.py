@@ -7,11 +7,13 @@ and stores results in a database. Supports parallel processing with multiple jud
 """
 
 import argparse
+import json
 import os
 import re
 import sys
 import threading
 import yaml
+import weave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +44,8 @@ class AnalysisArgs:
     database_output: bool
     database_path: Optional[str]
     max_workers: int
+    weave_enabled: bool
+    weave_project: Optional[str]
 
 
 def load_yaml_config(config_file: str) -> Dict[str, Any]:
@@ -66,7 +70,7 @@ def get_trial_trace(trace_parser: TraceParser, trial_id: str) -> str:
     """Get trace text for a trial ID."""
     try:
         trace = trace_parser.parse_trace(trial_id)
-        return trace.to_text(include_metadata=False)
+        return trace.to_json(include_metadata=False)
     except Exception as e:
         print(f"Warning: Could not parse trace for trial {trial_id}: {e}")
         return ""
@@ -77,7 +81,8 @@ def process_single_trial(
     trial_id: str, 
     results_lock: threading.Lock, 
     results: Dict[str, Any],
-    failure_prompt_type: str = 'mast'
+    failure_prompt_type: str = 'mast',
+    weave_enabled: bool = False
 ) -> Dict[str, Any]:
     """Process a single trial with the classifier."""
     try:
@@ -93,10 +98,14 @@ def process_single_trial(
             return {"trial_id": trial_id, "status": "error", "reason": "empty_trace"}
         
         # Classify the failure - use trial_id as task name since we don't have task groupings
-        result = classifier.process_trace(trace_text, trial_id)
+        # When Weave is enabled, the process_trace method is decorated with @weave.op()
+        # and will automatically track the execution
+        result = classifier.process_trace(trace=trace_text, trial_id=trial_id)
         
         # Handle different return formats based on prompt type
         if failure_prompt_type == 'mast' and isinstance(result, tuple):
+            failure_modes, full_analysis = result
+        elif failure_prompt_type == 'tb0':
             failure_modes, full_analysis = result
         else:
             failure_modes = result
@@ -123,7 +132,8 @@ def analyze_task_ids(
     failure_classifier: str,
     failure_prompt_type: str,
     judge_config: Optional[Dict[str, Any]] = None,
-    max_workers: int = 5
+    max_workers: int = 5,
+    weave_enabled: bool = False
 ) -> Dict[str, Any]:
     """
     Analyze task IDs using the specified classifier.
@@ -168,7 +178,8 @@ def analyze_task_ids(
                 trial_id, 
                 results_lock, 
                 results,
-                failure_prompt_type
+                failure_prompt_type,
+                weave_enabled
             ): trial_id
             for trial_id in task_ids
         }
@@ -219,13 +230,20 @@ def parse_config_to_args(config: Dict[str, Any]) -> AnalysisArgs:
         judges=classifier_config_dict.get('judges', [])
     )
     
+    # Parse Weave configuration
+    weave_config = config.get('weave_config', {})
+    weave_enabled = weave_config.get('enabled', False) if weave_config else False
+    weave_project = weave_config.get('project_name', None) if weave_config else None
+    
     return AnalysisArgs(
         task_ids=task_ids,
         failure_classifier=failure_classifier,
         classifier_config=classifier_config,
         database_output=config.get('database_output', False),
         database_path=config.get('database_path'),
-        max_workers=config.get('max_workers', 10)
+        max_workers=config.get('max_workers', 10),
+        weave_enabled=weave_enabled,
+        weave_project=weave_project
     )
 
 
@@ -291,6 +309,15 @@ def main(config):
     """Main analysis function."""
     args = parse_config_to_args(config)
     
+    # Initialize Weave if enabled
+    if args.weave_enabled:
+        project_name = args.weave_project or os.getenv("WANDB_PROJECT", "judge")
+        print(f"Initializing Weave with project: {project_name}")
+        weave.init(project_name)
+        print("Weave tracking enabled")
+    else:
+        print("Weave tracking disabled")
+    
     print(f"Analyzing {len(args.task_ids)} specified task IDs")
     
     # Determine what needs processing
@@ -347,13 +374,31 @@ def process_judge(judge_name: str, task_judge_pairs_to_process: Dict[str, List[s
         "failure_prompt_type": args.classifier_config.failure_prompt_type
     }
     
-    results = analyze_task_ids(
-        tasks_for_judge,
-        args.failure_classifier,
-        args.classifier_config.failure_prompt_type,
-        judge_config=classifier_config,
-        max_workers=args.max_workers
-    )
+    # If Weave is enabled, add a run context for this judge
+    if args.weave_enabled:
+        run_config = {
+            "judge_name": judge_name,
+            "prompt_type": args.classifier_config.failure_prompt_type,
+            "num_tasks": len(tasks_for_judge)
+        }
+        with weave.attributes(run_config):
+            results = analyze_task_ids(
+                tasks_for_judge,
+                args.failure_classifier,
+                args.classifier_config.failure_prompt_type,
+                judge_config=classifier_config,
+                max_workers=args.max_workers,
+                weave_enabled=args.weave_enabled
+            )
+    else:
+        results = analyze_task_ids(
+            tasks_for_judge,
+            args.failure_classifier,
+            args.classifier_config.failure_prompt_type,
+            judge_config=classifier_config,
+            max_workers=args.max_workers,
+            weave_enabled=args.weave_enabled
+        )
     print(f"Analysis complete for judge: {judge_name}")
     
     # Save to database if requested
@@ -370,8 +415,45 @@ def save_results_to_database(results: Dict[str, Any], judge_name: str, args: Ana
     
     # Store results for each trial
     for trial_id, trial_data in results['trials'].items():
+        # Extract metadata from trace files - these MUST exist
+        trace_dir = BASE_DIR / "traces" / trial_id
+        
+        if not trace_dir.exists():
+            raise FileNotFoundError(f"Trial trace directory not found: {trace_dir}")
+        
+        # Load metadata from config.json
+        config_path = trace_dir / "config.json"
+        if not config_path.exists():
+            raise FileNotFoundError(f"Trial config.json not found: {config_path}")
+            
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Extract agent.name and agent.model_name from config
+        agent_config = config.get('agent', {})
+        model_name = agent_config.get('model_name', 'unknown')  # e.g., "openai/gpt-5"
+        agent_name = agent_config.get('name', 'unknown')  # e.g., "terminus-2"
+        
+        # Clean up model name if it has a prefix like "openai/"
+        if '/' in model_name:
+            model_name = model_name.split('/')[-1]
+        
+        # Load task name from result.json if available
+        task_name = None
+        result_path = trace_dir / "result.json"
+        if result_path.exists():
+            with open(result_path, 'r') as f:
+                result = json.load(f)
+                task_name = result.get('task_name')
+        
         # First insert the trial if it doesn't exist
-        db.insert_trial(trial_id=trial_id)
+        db.insert_trial(
+            trial_id=trial_id,
+            task_name=task_name,
+            agent_name=agent_name,
+            model_name=model_name,
+            trace_length=trial_data.get('trace_length')
+        )
         
         if 'failure_modes' in trial_data:
             failure_modes_dict = format_failure_modes(trial_data['failure_modes'])
@@ -412,6 +494,7 @@ def format_failure_modes(raw_failure_modes) -> Dict[str, Dict[str, Any]]:
             if isinstance(value, dict):
                 failure_modes_dict[mode] = {
                     'score': float(value.get('score', 0)),
+                    'confidence': float(value.get('confidence', 0)),
                     'evidence': value.get('evidence', ''),
                     'required_skill': value.get('required_skill', '')
                 }
@@ -420,6 +503,7 @@ def format_failure_modes(raw_failure_modes) -> Dict[str, Dict[str, Any]]:
                 score = value[0] if value else 0
                 failure_modes_dict[mode] = {
                     'score': float(score),
+                    'confidence': float(score),
                     'evidence': '',
                     'required_skill': ''
                 }
@@ -427,6 +511,7 @@ def format_failure_modes(raw_failure_modes) -> Dict[str, Dict[str, Any]]:
                 # If value is a scalar, use it as score
                 failure_modes_dict[mode] = {
                     'score': float(value),
+                    'confidence': float(value),
                     'evidence': '',
                     'required_skill': ''
                 }
@@ -444,7 +529,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config-file", 
         help="Configuration file", 
-        default="config/failure_debug.yaml"
+        default="config/failure_debug_t0.yaml"
     )
     args = parser.parse_args()
     

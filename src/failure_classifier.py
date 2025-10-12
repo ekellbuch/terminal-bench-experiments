@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from anthropic import Anthropic
 import openai
+import weave
 
 BASE_DIR = Path(__file__).parent.parent
 
@@ -94,6 +95,8 @@ class FailureAnalyzerJudge(FailureProcessor):
         self.model_name = self.config.get("model_name", None)  # Will be set based on provider
         self.llm_provider = self.config.get("llm_provider", self._get_model_provider())
         self.failure_prompt_type = self.config.get("failure_prompt_type", "mast")
+        # Check if Weave should be explicitly disabled (for cases where it's already initialized)
+        self.skip_weave_init = self.config.get("skip_weave_init", True)
         
         if self.llm_provider == "anthropic":
             self.client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -124,18 +127,34 @@ class FailureAnalyzerJudge(FailureProcessor):
             response = self.client.messages.create(
                 model=self.model_name,
                 temperature=0,
-                #max_tokens=8192,
+                max_tokens=8192,
                 messages=[{"role": "user", "content": prompt}]
             )
             return response.content[0].text
         elif self.llm_provider == "openai":
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                temperature=1.0,
-                messages=[{"role": "user", "content": prompt}],
-                timeout=300  # 5 minute timeout for GPT-5
-            )
-            return response.choices[0].message.content
+            msg = [{"role": "user", "content": prompt}]
+            model = self.model_name.lower()
+
+            kwargs = {"model": self.model_name, "messages": msg, "timeout": 300}
+
+            if "o1" in model:
+                kwargs.update({
+                    "reasoning": {"effort": "low"},
+                    "text": {"verbosity": "low"},
+                    "seed": 42,
+                })
+            elif "gpt-5" in model:
+                # GPT-5 uses default parameters only
+                pass
+            else:
+                kwargs.update({
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "max_tokens": 4096,
+                })
+
+            response = self.client.chat.completions.create(**kwargs)
+            return response.choices[0].message.content            
         elif self.llm_provider == "local":
             return self._local_classify(prompt)
         else:
@@ -152,7 +171,8 @@ class FailureAnalyzerJudge(FailureProcessor):
         return parse_response_function(response)
 
 
-    def process_trace(self, trace: str, task_description: str = ""):
+    @weave.op()
+    def process_trace(self, trace: str, task_description: str = "", trial_id: str = None):
         """
         Classify a failure trace into one or more failure modes using LLM.
         
@@ -203,6 +223,7 @@ class FailureEmbedder(FailureProcessor):
         # Initialize OpenAI client for embeddings
         self.client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     
+    @weave.op()
     def process_trace(self, trace: str, task_description: str = "") -> Dict:
         """
         Process a failure trace and return embedding results in standardized format.
@@ -307,29 +328,51 @@ def get_config(classifier_type: str, failure_prompt_type: str="mast", model_name
 
 if __name__ == "__main__":
     
+    # Initialize Weave with project name
+    debug = 1
+    if not debug:
+        weave_project = os.getenv("WANDB_PROJECT", "judge")
+        weave.init(weave_project)
+
     # Example usage
     parser = TraceParser(BASE_DIR / "traces")
     
-    trial_id = "57141c5b-894c-4a75-8e4f-067bda64fd7d"
+    trial_id = "0167e4f1-558a-499f-b095-933391437034"  # Large trace - may take time with GPT-5
     failure_classifier = "judge"
-    model_name="gpt-5"
+    model_name = "gpt-5"
+    prompt_type = "tb0"  # Can be "base", "mast", "timeout", or "tb0"
+    
     # Read the trace
     trace = parser.parse_trace(trial_id)
-    trace_text = trace.to_text(include_metadata=False)
+    trace_text = trace.to_json(include_metadata=False)
 
+    # write to json files
+    if debug:
+        # write prompt to file: `$TBENCH/prompts/failure_classifier_prompt.txt`
+        prompt_path = BASE_DIR / "prompts" / "failure_classifier_trace" / f"{trial_id}.txt"
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)  # ensure dir exists
+        with open(prompt_path, "w") as f:
+            f.write(trace_text)
 
-    classifier = FAILURE_CLASSIFIERS[failure_classifier](config=get_config("judge", "mast", model_name))
-    # Print classification prompt:
-    prompt = classifier._prepare_text(trace_text, trace.get_task_name())
+    classifier = FAILURE_CLASSIFIERS[failure_classifier](config=get_config("judge", prompt_type, model_name))
 
-    # write prompt to file: `$TBENCH/prompts/failure_classifier_prompt.txt`
-    prompt_path = BASE_DIR / "prompts" / "failure_classifier_prompt" / f"{trial_id}.txt"
-    prompt_path.parent.mkdir(parents=True, exist_ok=True)  # ensure dir exists
-    with open(prompt_path, "w") as f:
-        f.write(prompt)
+    if debug:
+        # Print classification prompt:
+        prompt = classifier._prepare_text(trace_text, trace.get_task_name())
 
-    #print(prompt, flush=True)
-    failure_modes = classifier.process_trace(trace_text, trace.get_task_name())
+        # write prompt to file: `$TBENCH/prompts/failure_classifier_prompt.txt`
+        prompt_path = BASE_DIR / "prompts" / f"failure_classifier_prompt_{prompt_type}" / f"{trial_id}.txt"
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)  # ensure dir exists
+        with open(prompt_path, "w") as f:
+            f.write(prompt)
 
+        print(f"Generated {prompt_type} prompt for trial {trial_id}")
+        print(f"Prompt saved to: {prompt_path}")
+        
+    # Test classification:
+    print(f"Processing trial {trial_id} with {model_name}...")
+    print(f"Trace size: {len(trace_text)} characters")
+        
+    failure_modes = classifier.process_trace(trace=trace_text, trial_id=trial_id)
+    print("\nResults:")
     print(failure_modes, flush=True)
-    # Classify the trace

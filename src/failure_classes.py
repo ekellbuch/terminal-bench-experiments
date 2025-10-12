@@ -137,6 +137,48 @@ OUTPUT_MODE_RUBRIC = {
 }
 
 
+# Define merged categories and labels
+MAST_MERGED_CATEGORIES = {
+    "Specification Issues": ["1.1+1.2", "1.3", "1.5"],
+    "Communication Misalignment": ["1.4+2.1+2.5", "2.2", "2.3", "2.4", "2.6"],
+    "Task Verification": ["3.1", "3.2", "3.3"]
+}
+
+MAST_MERGED_LABELS = {
+    "1.1+1.2": "Disobey specification",
+    "1.3": "Step repetition",
+    "1.5": "Unaware of termination conditions",
+    "1.4+2.1+2.5": "Context loss",
+    "2.2": "Fail to ask for clarification",
+    "2.3": "Task derailment",
+    "2.4": "Information withholding",
+    "2.6": "Reasoning-action mismatch",
+    "3.1": "Premature termination",
+    "3.2": "No or incomplete verification",
+    "3.3": "Incorrect verification"
+}
+
+# Mapping from original modes to merged modes
+MAST_MODE_MAPPING = {
+    "1.1": "1.1+1.2",
+    "1.2": "1.1+1.2",
+    "1.4": "1.4+2.1+2.5",
+    "2.1": "1.4+2.1+2.5",
+    "2.5": "1.4+2.1+2.5",
+    # Keep others as-is
+    "1.3": "1.3",
+    "1.5": "1.5",
+    "2.2": "2.2",
+    "2.3": "2.3",
+    "2.4": "2.4",
+    "2.6": "2.6",
+    "3.1": "3.1",
+    "3.2": "3.2",
+    "3.3": "3.3"
+}
+
+
+
 def make_failure_prompt(trace: str, task_description: Optional[str] = None, **kwargs):
   # Convert FAILURE_MODE_RUBRIC to a string format
     rubric_text = ""
@@ -295,11 +337,121 @@ def make_mast_prompt(trace: str, task_description: str, definitions: Optional[st
     )
     return prompt
 
+def make_tb0_prompt(trace: str, task_description: str, definitions: Optional[str] = None, examples: Optional[str] = None):
+
+    if definitions is None:
+        definitions = open(BASE_DIR / "taxonomies/tb_v0/definitions.txt", "r").read()
+    if examples is None:
+        examples = open(BASE_DIR / "taxonomies/tb_v0/examples.txt", "r").read()
+
+    prompt = f"""
+You are an expert in analyzing and evaluating command-line (CLI) traces of autonomous agents performing tasks in a Linux environment.
+Your goal is to identify and classify failure modes and inefficiencies observable in the agent’s interactions, based strictly on the recorded terminal inputs and outputs.
+The provided trace is composed of one or multiple sequential episodes, each capturing a distinct stage of the agent’s interaction cycle.
+Each episode contains:
+- Task Prompt: The task description and the current terminal context visible to the agent.
+- Terminal Output: The raw results from commands executed in the previous step.
+- Agent Response: The agent’s structured JSON output containing its analysis, plan, and next commands.
+
+Together, these episodes form a complete multi-step problem-solving session.
+Evaluate both episode-level behavior and cross-episode patterns (e.g., repetition, derailment, context loss).
+
+---
+
+###  Evaluation Objective
+
+You will:
+1. Examine the provided trace carefully.
+2. Identify any *observable* signs of failure modes or inefficiencies as defined below.
+3. Determine whether the overall task was successfully completed.
+4. Summarize your findings briefly.
+5. For **each** failure mode, indicate:
+- label: (`yes`, `no`, or `unclear`)
+- evidence: short explanation citing concrete commands, outputs, or actions.
+- confidence_score: float between 0.0 and 1.0 for your classification of that failure mode.
+
+
+Important:Do not infer hidden reasoning or intentions. Mark "yes" only when clear textual evidence supports the classification.
+---
+
+### Output Format
+
+Return only valid JSON using the structure below.
+All answers must be lowercased (`yes`, `no`, or `unclear`).  
+
+
+{{
+"summary": "<1–5 sentence factual summary of observed problems or inefficiencies>",
+"task_completed": "<yes|no|unclear>",
+"failure_modes": {{
+    "1.1 Disobey Specification": {{
+    "label": "<yes|no|unclear>",
+    "evidence": "<short justification>",
+    "confidence_score": <float>
+    }},
+    "1.2 Step Repetition": {{ ...
+    }},
+    "1.3 Unaware of Termination Conditions": {{
+    ...
+    }},
+    "2.1 Context Loss": {{
+    ...
+    }},
+    "2.2 Information Withholding": {{
+    ...
+    }},
+    "2.3 Reasoning–Action Mismatch": {{
+    ...
+    }},
+    "3.1 Premature Termination": {{
+    ...
+    }},
+    "3.2 Weak Verification": {{
+    ...
+    }},
+    "3.3 No or Incorrect Verification": {{
+    ...
+    }}
+}}
+}}
+
+---
+
+### Evaluation Rules
+
+- **Evidence-based only:** Mark "yes" only if you can quote or summarize a specific command, error, or pattern from the trace.
+- **Ambiguity:** Use "unclear" when evidence is partial or uncertain.
+- **Confidence:** Reflects per-label certainty (1.0 = fully confident, 0.5 = uncertain).
+- **Consistency:** if all labels are "no," ensure the summary states "No failures or inefficiencies detected."
+- If `"task_completed": "no"`, explain why in the summary.
+- **System-Level Exclusions:** Apply to all categories. Do *not* count external timeouts, sandbox interruptions, or other terminations outside the agent’s control as agent failures.
+
+
+---
+
+### Definitions of Failure Modes
+{definitions}
+---
+
+---
+
+### Provided Context
+
+Here is the trace:
+{trace}
+
+Now output the JSON response described above — and **nothing else**.
+"""
+    
+    return prompt
+
+
 
 MAKE_FAILURE_PROMPTS = {
     "base": make_failure_prompt,
     "mast": make_mast_prompt,
-    "timeout": make_timeout_prompt
+    "timeout": make_timeout_prompt,
+    "tb0" : make_tb0_prompt,
 }
 
 
@@ -423,9 +575,80 @@ def parse_response_timeout(response: str) -> Dict[str, Any]:
     return failure_modes
 
 
+def parse_response_tb0(response: str) -> Tuple[Dict[str, any], str]:
+    """Parse TB0 response to extract failure modes and analysis.
+    
+    Returns:
+        Tuple of (failure_modes_dict, full_analysis_text)
+    """
+    try:
+        # Clean up the response - remove markdown if present
+        cleaned_response = response.strip()
+        if cleaned_response.startswith("```json"):
+            cleaned_response = cleaned_response[7:]
+        if cleaned_response.startswith("```"):
+            cleaned_response = cleaned_response[3:]
+        if cleaned_response.endswith("```"):
+            cleaned_response = cleaned_response[:-3]
+        cleaned_response = cleaned_response.strip()
+        
+        # Parse JSON response
+        result = json.loads(cleaned_response)
+        
+        # Extract summary and task_completed
+        summary = result.get("summary", "")
+        task_completed = result.get("task_completed", "unclear")
+        
+        # Extract failure modes
+        failure_modes_raw = result.get("failure_modes", {})
+        
+        # Convert to standardized format
+        failure_modes = {}
+        for mode_name, mode_data in failure_modes_raw.items():
+            # Extract mode number (e.g., "1.1" from "1.1 Disobey Specification")
+            mode_num = mode_name.split()[0] if ' ' in mode_name else mode_name
+            
+            # Convert label to score
+            label = mode_data.get("label", "no").lower()
+            if label == "yes":
+                score = 1.0
+            elif label == "unclear":
+                score = 0.5
+            else:
+                score = 0.0
+            
+            # Use confidence_score if provided, otherwise use converted score    
+            confidence = mode_data.get("confidence_score", score)
+            
+            failure_modes[mode_num] = {
+                "score": score,
+                'confidence': confidence,
+                'evidence': mode_data.get("evidence", ""),
+                'required_skill': mode_data.get("required_skill", "")
+            }
+        
+        # Create full analysis text combining all information
+        full_analysis = f"Summary: {summary}\nTask Completed: {task_completed}\n"
+        for mode_name, mode_data in failure_modes_raw.items():
+            full_analysis += f"{mode_name}: {mode_data.get('label', 'no')}"
+            if mode_data.get('evidence'):
+                full_analysis += f" - {mode_data['evidence']}"
+            full_analysis += "\n"
+        
+        return failure_modes, full_analysis
+        
+    except json.JSONDecodeError as e:
+        print(f"ERROR: Failed to parse TB0 JSON response: {e}")
+        print(f"Response was: {repr(response[:500])}")
+        raise
+    except Exception as e:
+        raise ValueError(f"Error parsing TB0 response: {e}")
+
+
 PARSE_RESPONSE_FUNCTIONS = {
     "base": parse_response_base,
     "mast": parse_response_mast,
+    "tb0": parse_response_tb0,
     "timeout": parse_response_timeout
 }
 

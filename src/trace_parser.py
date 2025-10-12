@@ -244,23 +244,23 @@ class TraceData:
             content.append(json.dumps(self.result, indent=2))
             content.append("")
         
-        # Add exception if present
-        if self.has_exception():
-            content.append("=== EXCEPTION ===")
-            content.append(self.exception)
-            content.append("")
-        
         # Add episodes
         if self.episodes:
             content.append("=== AGENT EPISODES ===")
             for episode in self.episodes:
                 content.append(f"\n--- Episode {episode.episode_number} ---")
                 content.append("PROMPT:")
-                content.append(episode.prompt)
+                content.append(episode.prompt.rstrip())
                 content.append("\nRESPONSE:")
                 content.append(episode.response)
                 content.append("")
         
+        # Add exception if present
+        if self.has_exception():
+            content.append("=== EXCEPTION ===")
+            content.append(self.exception)
+            content.append("")
+
         # Add verifier data if available
         if self.verifier_data and include_metadata:
             content.append("=== VERIFIER ===")
@@ -269,6 +269,64 @@ class TraceData:
         
         return "\n".join(content)
     
+    def to_json(self, include_metadata: bool = False, pretty: bool = True) -> str:
+        """
+        Convert trace data to JSON format.
+        
+        Args:
+            include_metadata: Whether to include config, result, and verifier data
+            pretty: Whether to format with indentation (False for JSONL)
+            
+        Returns:
+            JSON string representation of the trace
+        """
+        if include_metadata:
+            data = {
+                "trial_id": self.trial_id,
+                "task_name": self.get_task_name(),
+                "agent_name": self.get_agent_name(),
+                "model_name": self.get_model_name(),
+            }
+            
+            # Add reward if available
+            if self.get_reward() is not None:
+                data["reward"] = self.get_reward()
+            
+            # Add optional metadata fields
+            if self.config:
+                data["config"] = self.config
+            if self.result:
+                data["result"] = self.result
+            if self.verifier_data:
+                data["verifier"] = self.verifier_data
+        else:
+            # Minimal data - just core identifiers
+            data = {
+                #"trial_id": self.trial_id,
+            }
+        
+        # Add episodes (always include if exists)
+        if self.episodes:
+            data["episodes"] = [
+                {
+                    "episode_number": episode.episode_number,
+                    "prompt": episode.prompt.rstrip(),
+                    "response": episode.response.rstrip()
+                }
+                for episode in self.episodes
+            ]
+
+        # Add exception if present (always include if exists)
+        if self.has_exception():
+            data["exception"] = self.exception
+        
+        
+        # Return formatted JSON
+        if pretty:
+            return json.dumps(data, indent=2, ensure_ascii=False)
+        else:
+            return json.dumps(data, ensure_ascii=False)
+            
     def get_episodes_text(self, max_episodes: Optional[int] = None) -> str:
         """
         Get just the episodes content as text, useful for focused analysis.
@@ -288,9 +346,13 @@ class TraceData:
         for episode in episodes_to_process:
             content.append(f"--- Episode {episode.episode_number} ---")
             content.append("PROMPT:")
-            content.append(episode.prompt)
+            #content.append(episode.prompt)
+            prompt = episode.prompt.rstrip()  # Remove all trailing whitespace
+            prompt += "\n\n"  # Add back exactly 2 newlines for clean spacing
+            content.append(prompt)
+
             content.append("\nRESPONSE:")
-            content.append(episode.response)
+            content.append(episode.response.rstrip())
             content.append("")
         
         return "\n".join(content)
