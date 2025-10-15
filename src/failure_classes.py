@@ -6,6 +6,104 @@ import re
 BASE_DIR = Path(__file__).parent.parent
 
 
+def extract_dict_from_text(text: str) -> Optional[Dict]:
+    """Extract dictionary from text that may be in Python dict or JSON format.
+    
+    This function handles cases where LLMs return Python dicts (single quotes) 
+    or JSON (double quotes), possibly with extra text.
+    
+    Args:
+        text: Text that may contain a dictionary
+        
+    Returns:
+        Parsed dictionary object or None if extraction fails
+    """
+    import ast
+    
+    # Clean up common markdown wrappers
+    cleaned = text.strip()
+    
+    # Remove markdown code blocks
+    if '```json' in cleaned.lower():
+        parts = cleaned.split('```json', 1)
+        if len(parts) > 1:
+            cleaned = parts[1].split('```')[0].strip()
+    elif '```' in cleaned:
+        parts = cleaned.split('```')
+        if len(parts) >= 3:
+            cleaned = parts[1].strip()
+    
+    # Method 1: Try JSON parsing first (fastest for valid JSON)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+    
+    # Method 2: Try ast.literal_eval for Python dict format (with single quotes)
+    try:
+        result = ast.literal_eval(cleaned)
+        if isinstance(result, dict):
+            return result
+    except (ValueError, SyntaxError):
+        pass
+    
+    # Method 3: Find dictionary boundaries and extract
+    start_idx = cleaned.find('{')
+    if start_idx >= 0:
+        # Find matching closing brace
+        brace_count = 0
+        for i in range(start_idx, len(cleaned)):
+            if cleaned[i] == '{':
+                brace_count += 1
+            elif cleaned[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    dict_str = cleaned[start_idx:i+1]
+                    
+                    # Try ast.literal_eval first (handles Python dict format)
+                    try:
+                        result = ast.literal_eval(dict_str)
+                        if isinstance(result, dict):
+                            return result
+                    except (ValueError, SyntaxError):
+                        pass
+                    
+                    # Try JSON parsing
+                    try:
+                        return json.loads(dict_str)
+                    except json.JSONDecodeError:
+                        pass
+                    
+                    break
+    
+    # Method 4: Handle truncated responses by extracting what we can
+    # Look for key-value pairs even if the dict is incomplete
+    if '{' in cleaned:
+        truncated_start = cleaned.find('{')
+        truncated_dict = cleaned[truncated_start:]
+        
+        # Try to extract at least some key-value pairs
+        summary_match = re.search(r"['\"]summary['\"]\s*:\s*['\"]([^'\"]*)['\"]" , truncated_dict)
+        task_match = re.search(r"['\"]task_completed['\"]\s*:\s*['\"]([^'\"]*)['\"]" , truncated_dict)
+        
+        if summary_match or task_match:
+            # Build a minimal dict from what we can extract
+            extracted = {}
+            if summary_match:
+                extracted['summary'] = summary_match.group(1)
+            if task_match:
+                extracted['task_completed'] = task_match.group(1)
+            
+            # Add empty failure_modes if not found
+            if 'failure_modes' not in extracted:
+                extracted['failure_modes'] = {}
+                
+            return extracted
+    
+    # If all methods fail, return None
+    return None
+
+
 FAILURE_MODE_RUBRIC = {
     "Instruction Misunderstanding": {
         "definition": "The agent misunderstood the natural language task.",
@@ -337,95 +435,226 @@ def make_mast_prompt(trace: str, task_description: str, definitions: Optional[st
     )
     return prompt
 
-def make_tb0_prompt(trace: str, task_description: str, definitions: Optional[str] = None, examples: Optional[str] = None):
+
+def parse_failure_definitions(text: str, indent: int = 2):
+    """
+    Parse a taxonomy definitions.txt file and build a structured JSON schema template.
+
+    Each failure mode (e.g., "1.1 Disobey Specification") becomes:
+        {
+          "label": "<yes | no | unclear>",
+          "evidence": "<short justification>",
+          "confidence_score": <float>
+        }
+    """
+
+    #with open(definitions_path, "r") as f:
+    #    text = f.read()
+
+    # Match patterns like "1.1 Disobey Specification (Process Compliance)"
+    pattern = r"(?m)^\s*(\d+\.\d+)\s+([A-Za-z–\-\s]+)\s*(?:\([^)]+\))?"
+    matches = re.findall(pattern, text)
+
+    failure_modes = {}
+    for number, title in matches:
+        key = f"{number.strip()} {title.strip()}"
+        failure_modes[key] = {
+            "label": "<yes | no | unclear>",
+            "evidence": "<justification>",
+            "confidence_score": "<float>"
+        }
+
+    # Assemble final template
+    schema = {
+        "summary": "<1–5 sentence factual summary of observed problems or inefficiencies, "
+                   "optionally citing short quotes or episode references "
+                   "(e.g., 'Episode 3: command not found', 'Episode 5: declared success before running tests').>",
+        "task_completed": "<yes | no | unclear>",
+        "failure_modes": failure_modes
+    }
+
+    #print(json.dumps(schema, indent=indent, ensure_ascii=False))
+    return schema
+
+
+def make_tb0_prompt(trace: str, task_description: str, definitions: Optional[str] = None, examples: Optional[str] = None, 
+                    reward: Optional[float] = None, verifier_data: Optional[Dict[str, Any]] = None):
 
     if definitions is None:
         definitions = open(BASE_DIR / "taxonomies/tb_v0/definitions.txt", "r").read()
     if examples is None:
         examples = open(BASE_DIR / "taxonomies/tb_v0/examples.txt", "r").read()
 
+    # Format verifier data if provided
+    if verifier_data is not None:
+        summaries = []
+        for fname, content in verifier_data.items():
+            # Skip reward or invalid entries
+            if not isinstance(content, str) or "reward" in fname.lower():
+                continue
+
+            content = content.strip()
+            if not content:
+                continue
+
+            summaries.append(f"**{fname}:**\n```\n{content}\n```")
+
+        verifier_section = "\n\n### Verifier Information\n" + (
+            "\n\n".join(summaries) if summaries else "No verifier output provided."
+        )
+    else:
+        verifier_section = ""
+
+
+    # Format reward information
+    reward_section = ""
+    if reward is not None:
+        if reward == 1.0:
+            reward_section = "\n\n### Task Reward\nTask completed successfully according to verifier."
+        elif reward == 0.0:
+            reward_section = "\n\n### Task Reward\nTask failed according to verifier."
+        else:
+            raise ValueError(f"Invalid reward: {reward}")
+            #reward_section = "\n\n### Task Reward\nTask partially completed according to verifier."
+
+    schema = parse_failure_definitions(definitions)
+    
     prompt = f"""
-You are an expert in analyzing and evaluating command-line (CLI) traces of autonomous agents performing tasks in a Linux environment.
-Your goal is to identify and classify failure modes and inefficiencies observable in the agent’s interactions, based strictly on the recorded terminal inputs and outputs.
-The provided trace is composed of one or multiple sequential episodes, each capturing a distinct stage of the agent’s interaction cycle.
+You are an expert in analyzing and evaluating command-line (CLI) traces of autonomous agents performing tasks in an environment.
+Your goal is to identify and classify **failure modes** based solely on observable behavior in the trace.
+Ground all judgments in **explicit textual or behavioral evidence** visible in the trace.
+
+---
+
+### Trace Composition
+
+A trace is a sequence of **episodes** representing reasoning–action–feedback cycles.
+
+Episode 0 establishes the starting context for the entire trace (task description and initial environment).
+Each subsequent episode (1, 2, …) records one cycle: terminal output, agent analysis/plan, commands for next episode.
+
 Each episode contains:
-- Task Prompt: The task description and the current terminal context visible to the agent.
-- Terminal Output: The raw results from commands executed in the previous step.
-- Agent Response: The agent’s structured JSON output containing its analysis, plan, and next commands.
 
-Together, these episodes form a complete multi-step problem-solving session.
-Evaluate both episode-level behavior and cross-episode patterns (e.g., repetition, derailment, context loss).
+1. **Terminal Output**
+   The raw CLI output produced by the environment in response to the agent’s previous commands.
 
+2. **Agent Response** JSON with:
+   * "analysis" : the agent’s interpretation of the terminal state and progress.
+   * "plan": rationale for the following actions.
+   * "commands" : a list of command objects (keystrokes and timing).
+   * "task_complete" *(optional)* : a flag indicating whether the task finished according to the verifier.
+
+Together, **Episode 0** and the sequence of subsequent episodes form a complete **interaction trace**, illustrating how the agent observes, reasons, and acts over time to accomplish the defined terminal task.
+
+---
+
+You must analyze both:
+- **Episode-level behavior** (within-step performance)  
+- **Cross-episode patterns** (consistency and evolution over time)
+
+---
+### Task Outcome and Verifier Context
+{reward_section}{verifier_section}
+
+- Task outcome and verifier output are **reference only** to confirm task success or failure.  
+- Do **not** extract reasoning errors or commands from verifier logs.  
+- Base all judgments strictly on the **agent’s trace (Episodes 0–N)**.
 ---
 
 ###  Evaluation Objective
 
-You will:
 1. Examine the provided trace carefully.
 2. Identify any *observable* signs of failure modes or inefficiencies as defined below.
-3. Determine whether the overall task was successfully completed.
-4. Summarize your findings briefly.
-5. For **each** failure mode, indicate:
-- label: (`yes`, `no`, or `unclear`)
-- evidence: short explanation citing concrete commands, outputs, or actions.
-- confidence_score: float between 0.0 and 1.0 for your classification of that failure mode.
+3. Assess overall task completion** using both the trace and verifier signal.
+4. Summarize your findings (1-20 sentences).
+5. For **each** failure mode, record:
+    - "label": (`yes`, `no`, or `unclear`)
+    - "evidence":  a short justification for your label — cite concrete trace content if `"yes"`, 
+      or briefly explain why evidence is absent or insufficient if `"no"` or `"unclear"`.
+    - "confidence_score": a float in `[0.0, 1.0]` reflecting certainty.
 
 
-Important:Do not infer hidden reasoning or intentions. Mark "yes" only when clear textual evidence supports the classification.
+> Mark `"yes"` only when clear textual evidence exists.  
+> Do **not** infer hidden reasoning, unstated intentions, or unseen system events.
+
+---
+
+### Evaluation & Scoring Checklist
+
+Follow this checklist *in order* for every trace you evaluate:
+
+A. **Confirm Task Context**
+
+   * [ ] Read all episodes carefully (prompt, output, agent response).
+   * [ ] Note whether the *verifier information* is provided and record its value.
+   * [ ] Identify the final agent declaration (e.g., “task complete,” “done,” “success”).
+
+B. **Determine Task Completion**
+
+   Use the information from the **Task Reward** section (if present) and the trace itself.
+   * [ ] If the reward text says the task *succeeded*, mark `"task_completed": "yes"`.
+   * [ ] If it says the task *failed*, mark `"task_completed": "no"`.
+   * [ ] If no reward text is present or outcome unclear from the trace, mark `"task_completed": "unclear"`.
+   * [ ] Add a short factual explanation in `"summary"` (e.g., “no reward info,” “trace truncated,” “verifier output missing”).
+
+C. **Evidence-Based Reasoning**
+
+   * [ ] Mark "yes" *only* when the trace contains direct evidence (command, log, or textual observation).
+   * [ ] Never infer hidden reasoning, internal states, or unobserved events.
+   * [ ] Use "unclear" if evidence is partial, indirect, or ambiguous.
+   * [ ] Avoid overconfident "yes" when evidence is weak.
+
+D. **Confidence Scoring**
+
+   * [ ] Assign a float between 0.0–1.0 reflecting certainty:
+
+     * 1.0: strong, explicit, repeated evidence
+     * 0.7: moderate, clear evidence
+     * 0.5: partial or single-instance evidence
+     * <0.5: speculative or weak signal
+   * [ ] Confidence must align with how clear the evidence is in the trace.
+
+E. **Failure Mode Classification**
+
+   * [ ] Evaluate every failure mode independently. Multiple "yes" labels are allowed.
+   * [ ] Refer to the definitions for criteria and anchor evidence.
+   * [ ] Use "yes", "no", or "unclear" for each category.
+   * [ ] If multiple apply, mark all relevant ones; do not force exclusivity.
+
+F. **System-Level Exclusions**
+
+   * [ ] Do not penalize the agent for:
+     * Sandbox or runtime timeouts
+     * Environment resets or external interruptions
+     * Missing files or states caused by the system, not the agent.
+
+G. **Output Format Requirements**
+
+   * [ ] Return only valid JSON in the specified schema.
+   * [ ] All keys and labels must be lowercase ("yes", "no", "unclear").
+   * [ ] Each "evidence" field should cite one concrete observation from the trace (e.g., "file not found", "declared success before running tests").
+   * [ ] Keep the "summary" concise (1–5 factual sentences).
+   * [ ] If all labels = "no", the summary must state "no failures or inefficiencies detected."
+
+H. **Cross-Check Consistency**
+
+   * [ ] Ensure "summary" agrees with "task_completed".
+   * [ ] Confidence values align with evidence strength.
+   * [ ] No contradictions between failure mode labels or between summary and evidence.
+
 ---
 
 ### Output Format
 
-Return only valid JSON using the structure below.
-All answers must be lowercased (`yes`, `no`, or `unclear`).  
+**CRITICAL REQUIREMENTS:**
+1. Return ONLY valid JSON - no explanatory text before or after
+2. Use double quotes for ALL strings (not single quotes like Python dicts)
+3. Ensure all JSON keys and string values are properly quoted
+4. The response must start with {{ and end with }}
+5. Do not wrap the JSON in markdown code blocks
 
-
-{{
-"summary": "<1–5 sentence factual summary of observed problems or inefficiencies>",
-"task_completed": "<yes|no|unclear>",
-"failure_modes": {{
-    "1.1 Disobey Specification": {{
-    "label": "<yes|no|unclear>",
-    "evidence": "<short justification>",
-    "confidence_score": <float>
-    }},
-    "1.2 Step Repetition": {{ ...
-    }},
-    "1.3 Unaware of Termination Conditions": {{
-    ...
-    }},
-    "2.1 Context Loss": {{
-    ...
-    }},
-    "2.2 Information Withholding": {{
-    ...
-    }},
-    "2.3 Reasoning–Action Mismatch": {{
-    ...
-    }},
-    "3.1 Premature Termination": {{
-    ...
-    }},
-    "3.2 Weak Verification": {{
-    ...
-    }},
-    "3.3 No or Incorrect Verification": {{
-    ...
-    }}
-}}
-}}
-
----
-
-### Evaluation Rules
-
-- **Evidence-based only:** Mark "yes" only if you can quote or summarize a specific command, error, or pattern from the trace.
-- **Ambiguity:** Use "unclear" when evidence is partial or uncertain.
-- **Confidence:** Reflects per-label certainty (1.0 = fully confident, 0.5 = uncertain).
-- **Consistency:** if all labels are "no," ensure the summary states "No failures or inefficiencies detected."
-- If `"task_completed": "no"`, explain why in the summary.
-- **System-Level Exclusions:** Apply to all categories. Do *not* count external timeouts, sandbox interruptions, or other terminations outside the agent’s control as agent failures.
-
+Return only valid JSON using the structure below:
+{schema}
 
 ---
 
@@ -433,16 +662,15 @@ All answers must be lowercased (`yes`, `no`, or `unclear`).
 {definitions}
 ---
 
----
+### Terminal Traces
 
-### Provided Context
-
-Here is the trace:
 {trace}
 
-Now output the JSON response described above — and **nothing else**.
+---
+
+Now output the JSON response described above — and **nothing else**. Remember: valid JSON with double quotes only, starting with {{ and ending with }}.
+
 """
-    
     return prompt
 
 
@@ -456,6 +684,7 @@ MAKE_FAILURE_PROMPTS = {
 
 
 def parse_response_base(response: str) -> Dict[str, any]:
+    """Parse base response with improved error handling and JSON extraction."""
     # Strip markdown code blocks if present
     cleaned_response = response.strip()
     if cleaned_response.startswith("```json"):
@@ -466,15 +695,28 @@ def parse_response_base(response: str) -> Dict[str, any]:
         cleaned_response = cleaned_response[:-3]
     cleaned_response = cleaned_response.strip()
     
-    try:
-        result = json.loads(cleaned_response)
-    except json.JSONDecodeError as e:
-        print(f"ERROR: Failed to parse JSON: {e}")
-        print(f"Cleaned response was: {repr(cleaned_response)}")
-        raise
+    # Try to extract dictionary if there's extra text
+    json_obj = extract_dict_from_text(cleaned_response)
+    if json_obj is None:
+        # If extraction failed, try direct parsing
+        try:
+            result = json.loads(cleaned_response)
+        except json.JSONDecodeError as e:
+            breakpoint()
+            print(f"ERROR: Failed to parse JSON: {e}")
+            print(f"Cleaned response was: {repr(cleaned_response[:500])}...")
+            # Return empty failure modes as fallback
+            print("WARNING: Returning empty failure modes due to parse error")
+            return {}
+    else:
+        result = json_obj
     
-    failure_modes = result.get("failure_modes", [])
-    assert all(key in OUTPUT_MODE_RUBRIC['failure_modes'].keys() for key in failure_modes.keys()), "Failure modes must match the OUTPUT_MODE_RUBRIC"
+    failure_modes = result.get("failure_modes", {})
+    # Validate keys if we got valid failure modes
+    if failure_modes and hasattr(OUTPUT_MODE_RUBRIC.get('failure_modes', {}), 'keys'):
+        invalid_keys = [key for key in failure_modes.keys() if key not in OUTPUT_MODE_RUBRIC['failure_modes'].keys()]
+        if invalid_keys:
+            print(f"WARNING: Invalid failure mode keys found: {invalid_keys}")
     return failure_modes
 
 def parse_response_mast(response: str) -> Tuple[Dict[str, any], str]:
@@ -558,7 +800,31 @@ def parse_response_mast(response: str) -> Tuple[Dict[str, any], str]:
 
 
 def parse_response_timeout(response: str) -> Dict[str, Any]:
-    result = json.loads(response)
+    """Parse timeout response with improved error handling."""
+    # Clean up the response - remove markdown if present
+    cleaned_response = response.strip()
+    if cleaned_response.startswith("```json"):
+        cleaned_response = cleaned_response[7:]
+    if cleaned_response.startswith("```"):
+        cleaned_response = cleaned_response[3:]
+    if cleaned_response.endswith("```"):
+        cleaned_response = cleaned_response[:-3]
+    cleaned_response = cleaned_response.strip()
+    
+    # Try to extract dictionary if there's extra text
+    json_obj = extract_dict_from_text(cleaned_response)
+    if json_obj is None:
+        try:
+            result = json.loads(cleaned_response)
+        except json.JSONDecodeError as e:
+            print(f"ERROR: Failed to parse timeout JSON: {e}")
+            print(f"Response was: {repr(cleaned_response[:500])}...")
+            # Return default structure on parse error
+            return {mode: {'score': 0, 'evidence': '', 'required_skill': ''} 
+                   for mode in TIMEOUT_FAILURE_RUBRIC.keys()}
+    else:
+        result = json_obj
+    
     failure_modes = result.get("failure_modes", {})
 
     expected = set(TIMEOUT_FAILURE_RUBRIC.keys())
@@ -568,7 +834,9 @@ def parse_response_timeout(response: str) -> Dict[str, Any]:
     extra = actual - expected
 
     if missing:
-        raise ValueError(f"Missing failure mode(s): {missing}")
+        print(f"WARNING: Missing failure mode(s): {missing}, adding with score=0")
+        for mode in missing:
+            failure_modes[mode] = {'score': 0, 'evidence': '', 'required_skill': ''}
     if extra:
         print(f"Warning: Unexpected failure mode(s): {extra}")
 
@@ -578,22 +846,30 @@ def parse_response_timeout(response: str) -> Dict[str, Any]:
 def parse_response_tb0(response: str) -> Tuple[Dict[str, any], str]:
     """Parse TB0 response to extract failure modes and analysis.
     
+    This function uses ast.literal_eval to handle Python dict format responses
+    as well as JSON format responses.
+    
     Returns:
         Tuple of (failure_modes_dict, full_analysis_text)
     """
     try:
-        # Clean up the response - remove markdown if present
-        cleaned_response = response.strip()
-        if cleaned_response.startswith("```json"):
-            cleaned_response = cleaned_response[7:]
-        if cleaned_response.startswith("```"):
-            cleaned_response = cleaned_response[3:]
-        if cleaned_response.endswith("```"):
-            cleaned_response = cleaned_response[:-3]
-        cleaned_response = cleaned_response.strip()
+        # Extract dictionary from response (handles both JSON and Python dict format)
+        result = extract_dict_from_text(response)
         
-        # Parse JSON response
-        result = json.loads(cleaned_response)
+        if result is None:
+            # If extraction completely failed, try to extract key info with regex
+            print(f"Warning: Could not parse TB0 response, attempting regex extraction")
+            print(f"Response preview: {response[:200]}...")
+            
+            # Try to extract at least the summary if present
+            summary_match = re.search(r"['\"]summary['\"]\s*:\s*['\"]([^'\"]*)['\"]" , response)
+            task_match = re.search(r"['\"]task_completed['\"]\s*:\s*['\"]([^'\"]*)['\"]" , response)
+            
+            summary = summary_match.group(1) if summary_match else "Failed to parse response"
+            task_completed = task_match.group(1) if task_match else "unclear"
+            
+            # Return empty failure modes with the extracted info
+            return {}, f"Summary: {summary}\nTask Completed: {task_completed}\n[Parse Error: Could not extract full response]"
         
         # Extract summary and task_completed
         summary = result.get("summary", "")
@@ -605,14 +881,18 @@ def parse_response_tb0(response: str) -> Tuple[Dict[str, any], str]:
         # Convert to standardized format
         failure_modes = {}
         for mode_name, mode_data in failure_modes_raw.items():
+            # Handle case where mode_data might be a string or other simple type
+            if not isinstance(mode_data, dict):
+                mode_data = {"label": str(mode_data)}
+                
             # Extract mode number (e.g., "1.1" from "1.1 Disobey Specification")
             mode_num = mode_name.split()[0] if ' ' in mode_name else mode_name
             
             # Convert label to score
-            label = mode_data.get("label", "no").lower()
-            if label == "yes":
+            label = str(mode_data.get("label", "no")).lower()
+            if label in ["yes", "true", "1"]:
                 score = 1.0
-            elif label == "unclear":
+            elif label in ["unclear", "maybe", "partial"]:
                 score = 0.5
             else:
                 score = 0.0
@@ -623,26 +903,28 @@ def parse_response_tb0(response: str) -> Tuple[Dict[str, any], str]:
             failure_modes[mode_num] = {
                 "score": score,
                 'confidence': confidence,
-                'evidence': mode_data.get("evidence", ""),
-                'required_skill': mode_data.get("required_skill", "")
+                'evidence': mode_data.get("evidence", "") if isinstance(mode_data, dict) else "",
+                'required_skill': mode_data.get("required_skill", "") if isinstance(mode_data, dict) else ""
             }
         
         # Create full analysis text combining all information
         full_analysis = f"Summary: {summary}\nTask Completed: {task_completed}\n"
         for mode_name, mode_data in failure_modes_raw.items():
-            full_analysis += f"{mode_name}: {mode_data.get('label', 'no')}"
-            if mode_data.get('evidence'):
-                full_analysis += f" - {mode_data['evidence']}"
+            if isinstance(mode_data, dict):
+                full_analysis += f"{mode_name}: {mode_data.get('label', 'no')}"
+                if mode_data.get('evidence'):
+                    full_analysis += f" - {mode_data['evidence']}"
+            else:
+                full_analysis += f"{mode_name}: {mode_data}"
             full_analysis += "\n"
         
         return failure_modes, full_analysis
         
-    except json.JSONDecodeError as e:
-        print(f"ERROR: Failed to parse TB0 JSON response: {e}")
-        print(f"Response was: {repr(response[:500])}")
-        raise
     except Exception as e:
-        raise ValueError(f"Error parsing TB0 response: {e}")
+        print(f"ERROR: Unexpected error parsing TB0 response: {e}") 
+        print(f"Response was: {repr(response[:300])}")
+        # Return empty failure modes with error information
+        return {}, f"[Parse Error: {str(e)}]\n"
 
 
 PARSE_RESPONSE_FUNCTIONS = {

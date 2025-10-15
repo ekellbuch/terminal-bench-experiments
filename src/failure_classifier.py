@@ -1,7 +1,7 @@
 import os
 import json
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from dotenv import load_dotenv
@@ -121,19 +121,49 @@ class FailureAnalyzerJudge(FailureProcessor):
         else:
             raise ValueError(f"Unsupported model: {self.model_name}")
     
-    def _get_response(self, prompt : str) -> Dict[str, any]:
-        """Get the response JSON from the LLM."""
+    def _get_response(self, prompt : str, retry_count: int = 0) -> Dict[str, any]:
+        """Get the response JSON from the LLM with retry logic and JSON validation.
+        
+        Args:
+            prompt: The prompt to send to the LLM
+            retry_count: Current retry attempt number
+            
+        Returns:
+            The LLM's response text
+        """
         if self.llm_provider == "anthropic":
+            # Add system message to enforce JSON output for Anthropic
+            system_msg = None
+            if self.failure_prompt_type in ["tb0", "mast", "base"]:
+                system_msg = (
+                    "You must return ONLY valid JSON in your response. "
+                    "Do not include any explanatory text before or after the JSON. "
+                    "Do not use Python dict format with single quotes. "
+                    "Use proper JSON format with double quotes for all strings."
+                )
+            
             response = self.client.messages.create(
                 model=self.model_name,
-                temperature=0,
+                temperature=0.0 if retry_count == 0 else 0.1,  # Slightly increase temp on retry
                 max_tokens=8192,
-                messages=[{"role": "user", "content": prompt}]
+                messages=[{"role": "user", "content": prompt}],
+                system=system_msg if system_msg else None
             )
             return response.content[0].text
+            
         elif self.llm_provider == "openai":
             msg = [{"role": "user", "content": prompt}]
             model = self.model_name.lower()
+            
+            # Add system message to enforce JSON output
+            if self.failure_prompt_type in ["tb0", "mast", "base"]:
+                system_msg = (
+                    "You must return ONLY valid JSON in your response. "
+                    "Do not include any explanatory text before or after the JSON. "
+                    "Do not use Python dict format with single quotes. "
+                    "Use proper JSON format with double quotes for all strings."
+                )
+                msg.insert(0, {"role": "system", "content": system_msg})
 
             kwargs = {"model": self.model_name, "messages": msg, "timeout": 300}
 
@@ -145,13 +175,18 @@ class FailureAnalyzerJudge(FailureProcessor):
                 })
             elif "gpt-5" in model:
                 # GPT-5 uses default parameters only
-                pass
+                # Try to use JSON mode if available
+                if self.failure_prompt_type in ["tb0", "mast", "base"]:
+                    kwargs["response_format"] = {"type": "json_object"}
             else:
                 kwargs.update({
-                    "temperature": 0.0,
+                    "temperature": 0.0 if retry_count == 0 else 0.1,
                     "top_p": 1.0,
                     "max_tokens": 4096,
                 })
+                # Try to use JSON mode for GPT-4 models
+                if "gpt-4" in model and self.failure_prompt_type in ["tb0", "mast", "base"]:
+                    kwargs["response_format"] = {"type": "json_object"}
 
             response = self.client.chat.completions.create(**kwargs)
             return response.choices[0].message.content            
@@ -168,31 +203,120 @@ class FailureAnalyzerJudge(FailureProcessor):
             For others: Just failure_modes dict
         """
         parse_response_function = PARSE_RESPONSE_FUNCTIONS[self.failure_prompt_type]
-        return parse_response_function(response)
+        try:
+            return parse_response_function(response)
+        except Exception as e:
+            print(f"ERROR parsing {self.failure_prompt_type} response: {e}")
+            print(f"Response preview (first 500 chars): {response[:500]}")
+            # Log full response to a debug file if it's a JSON issue
+            if "json" in str(e).lower() or "JSON" in str(e):
+                debug_file = f"/tmp/json_parse_error_{self.failure_prompt_type}.txt"
+                with open(debug_file, 'w') as f:
+                    f.write(f"Error: {e}\n\n")
+                    f.write(f"Full response:\n{response}")
+                print(f"Full response saved to {debug_file} for debugging")
+            raise
 
 
     @weave.op()
-    def process_trace(self, trace: str, task_description: str = "", trial_id: str = None):
+    def process_trace(self, trace: str, task_description: str = "", trial_id: str = None, 
+                     reward: Optional[float] = None, verifier_data: Optional[Dict[str, Any]] = None):
         """
         Classify a failure trace into one or more failure modes using LLM.
         
         Args:
             trace: The trace text to classify
             task_description: Optional description of what the task was supposed to do
+            trial_id: Optional trial ID for tracking
+            reward: Optional reward score from verifier (for tb0 prompt)
+            verifier_data: Optional verifier data dict (for tb0 prompt)
             
         Returns:
             For mast: Tuple of (failure_modes, full_analysis)
             For others: Just failure_modes dict
         """
         # Build the classification prompt
-        prompt = self._prepare_text(trace, task_description)
-        response_json = self._get_response(prompt)
-
-        result = self._parse_response(response_json)
-        return result
+        prompt = self._prepare_text(trace=trace,
+                                    task_description=task_description,
+                                    reward=reward,
+                                    verifier_data=verifier_data)
+        
+        # Try up to 3 times with validation
+        max_retries = 3
+        last_error = None
+        
+        for retry in range(max_retries):
+            try:
+                response_json = self._get_response(prompt, retry_count=retry)
+                
+                # Quick validation before parsing
+                if response_json and isinstance(response_json, str):
+                    cleaned = response_json.strip()
+                    # Remove any markdown wrappers
+                    if "```json" in cleaned.lower():
+                        parts = cleaned.split("```json", 1)
+                        if len(parts) > 1:
+                            cleaned = parts[1].split("```")[0]
+                    elif "```" in cleaned:
+                        parts = cleaned.split("```")
+                        if len(parts) >= 3:
+                            cleaned = parts[1]
+                    
+                    cleaned = cleaned.strip()
+                    
+                    # Check if it looks like JSON
+                    if not (cleaned.startswith('{') or cleaned.startswith('[')):
+                        # Maybe there's text before the JSON?
+                        json_start = cleaned.find('{')
+                        if json_start > 0:
+                            cleaned = cleaned[json_start:]
+                        else:
+                            raise ValueError(f"Response does not appear to be JSON: {cleaned[:100]}...")
+                    
+                    response_json = cleaned
+                
+                # Try to parse the response
+                result = self._parse_response(response_json)
+                
+                # Basic validation of the result
+                if self.failure_prompt_type in ["tb0", "mast"] and isinstance(result, tuple):
+                    # For tb0/mast, should return (failure_modes_dict, analysis_str)
+                    if len(result) == 2 and isinstance(result[0], dict):
+                        return result
+                elif isinstance(result, dict):
+                    return result
+                    
+                raise ValueError(f"Invalid result structure from parser: {type(result)}")
+                
+            except Exception as e:
+                last_error = e
+                if retry < max_retries - 1:
+                    print(f"Retry {retry + 1}/{max_retries} for trial {trial_id} due to: {str(e)[:200]}")
+                    
+                    # Modify prompt to emphasize JSON output on retry
+                    if retry == 0:
+                        prompt = prompt.replace(
+                            "Now output the JSON response",
+                            "CRITICAL: Return ONLY valid JSON with double quotes. No Python dicts. Now output the JSON response"
+                        )
+                    elif retry == 1:
+                        prompt = prompt.replace(
+                            "CRITICAL: Return ONLY valid JSON",
+                            "FINAL ATTEMPT: You MUST return valid JSON starting with { and using double quotes throughout"
+                        )
+                else:
+                    print(f"Failed after {max_retries} attempts for trial {trial_id}: {e}")
+        
+        # If all retries failed, raise the last error
+        if last_error:
+            raise last_error
+        
+        # Shouldn't reach here, but return empty result if it does
+        return ({}, "") if self.failure_prompt_type in ["mast", "tb0"] else {}
 
     
-    def _prepare_text(self, trace: str, task_description: Optional[str] = None) -> str:
+    def _prepare_text(self, trace: str, task_description: Optional[str] = None,
+                     reward: Optional[float] = None, verifier_data: Optional[Dict[str, Any]] = None) -> str:
         """Build the prompt for LLM classification."""
         # Check trace length
         if self.max_trace_length and len(trace) > self.max_trace_length:
@@ -201,7 +325,13 @@ class FailureAnalyzerJudge(FailureProcessor):
                 raise ValueError(f"Execution trace is too long ({len(trace)} characters). "
                                f"Maximum allowed length is {self.max_trace_length} characters.")
         
-        prompt = MAKE_FAILURE_PROMPTS[self.failure_prompt_type](trace, task_description)
+        # Pass additional parameters for tb0 prompt
+        if self.failure_prompt_type == "tb0":
+            prompt = MAKE_FAILURE_PROMPTS[self.failure_prompt_type](
+                trace, task_description, reward=reward, verifier_data=verifier_data
+            )
+        else:
+            prompt = MAKE_FAILURE_PROMPTS[self.failure_prompt_type](trace, task_description)
         
         return prompt
     
@@ -337,7 +467,7 @@ if __name__ == "__main__":
     # Example usage
     parser = TraceParser(BASE_DIR / "traces")
     
-    trial_id = "0167e4f1-558a-499f-b095-933391437034"  # Large trace - may take time with GPT-5
+    trial_id = "57141c5b-894c-4a75-8e4f-067bda64fd7d"  # Large trace - may take time with GPT-5
     failure_classifier = "judge"
     model_name = "gpt-5"
     prompt_type = "tb0"  # Can be "base", "mast", "timeout", or "tb0"

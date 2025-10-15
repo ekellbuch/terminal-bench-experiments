@@ -219,7 +219,7 @@ class TraceData:
         """Get number of episodes in the trace."""
         return len(self.episodes)
     
-    def to_text(self, include_metadata: bool = False) -> str:
+    def to_text(self, include_metadata: bool = False, include_verifier_data: bool = False) -> str:
         """Convert trace data to text format for analysis."""
         content = []
         
@@ -262,7 +262,7 @@ class TraceData:
             content.append("")
 
         # Add verifier data if available
-        if self.verifier_data and include_metadata:
+        if self.verifier_data and (include_metadata or include_verifier_data):
             content.append("=== VERIFIER ===")
             content.append(json.dumps(self.verifier_data, indent=2))
             content.append("")
@@ -496,7 +496,7 @@ class TraceParser:
             traces_dir: Directory containing trace subdirectories
         """
         self.traces_dir = Path(traces_dir).resolve()
-        print(f"Traces directory: {self.traces_dir}")
+        #print(f"Traces directory: {self.traces_dir}"m flush=True)
         if not self.traces_dir.exists():
             raise FileNotFoundError(f"Traces directory not found: {self.traces_dir}")
     
@@ -587,7 +587,7 @@ class TraceParser:
             with open(file_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            print(f"Warning: Could not parse JSON file {file_path}: {e}")
+            print(f"Warning: Could not parse JSON file {file_path}: {e}", flush=True)
             return None
     
     def _load_text_file(self, file_path: Path) -> Optional[str]:
@@ -606,7 +606,7 @@ class TraceParser:
             with open(file_path, 'r', encoding='utf-8') as f:
                 return f.read()
         except UnicodeDecodeError as e:
-            print(f"Warning: Could not read text file {file_path}: {e}")
+            print(f"Warning: Could not read text file {file_path}: {e}", flush=True)
             return None
     
     def _parse_episodes(self, agent_dir: Path) -> List[EpisodeData]:
