@@ -1,44 +1,44 @@
-from typing import Dict, List, Any, Optional, Tuple
-import os
+from typing import Dict, Any, Optional, Tuple
 from pathlib import Path
 import json
 import re
+
 BASE_DIR = Path(__file__).parent.parent
 
 
 def extract_dict_from_text(text: str) -> Optional[Dict]:
     """Extract dictionary from text that may be in Python dict or JSON format.
-    
-    This function handles cases where LLMs return Python dicts (single quotes) 
+
+    This function handles cases where LLMs return Python dicts (single quotes)
     or JSON (double quotes), possibly with extra text.
-    
+
     Args:
         text: Text that may contain a dictionary
-        
+
     Returns:
         Parsed dictionary object or None if extraction fails
     """
     import ast
-    
+
     # Clean up common markdown wrappers
     cleaned = text.strip()
-    
+
     # Remove markdown code blocks
-    if '```json' in cleaned.lower():
-        parts = cleaned.split('```json', 1)
+    if "```json" in cleaned.lower():
+        parts = cleaned.split("```json", 1)
         if len(parts) > 1:
-            cleaned = parts[1].split('```')[0].strip()
-    elif '```' in cleaned:
-        parts = cleaned.split('```')
+            cleaned = parts[1].split("```")[0].strip()
+    elif "```" in cleaned:
+        parts = cleaned.split("```")
         if len(parts) >= 3:
             cleaned = parts[1].strip()
-    
+
     # Method 1: Try JSON parsing first (fastest for valid JSON)
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
         pass
-    
+
     # Method 2: Try ast.literal_eval for Python dict format (with single quotes)
     try:
         result = ast.literal_eval(cleaned)
@@ -46,20 +46,20 @@ def extract_dict_from_text(text: str) -> Optional[Dict]:
             return result
     except (ValueError, SyntaxError):
         pass
-    
+
     # Method 3: Find dictionary boundaries and extract
-    start_idx = cleaned.find('{')
+    start_idx = cleaned.find("{")
     if start_idx >= 0:
         # Find matching closing brace
         brace_count = 0
         for i in range(start_idx, len(cleaned)):
-            if cleaned[i] == '{':
+            if cleaned[i] == "{":
                 brace_count += 1
-            elif cleaned[i] == '}':
+            elif cleaned[i] == "}":
                 brace_count -= 1
                 if brace_count == 0:
-                    dict_str = cleaned[start_idx:i+1]
-                    
+                    dict_str = cleaned[start_idx : i + 1]
+
                     # Try ast.literal_eval first (handles Python dict format)
                     try:
                         result = ast.literal_eval(dict_str)
@@ -67,39 +67,43 @@ def extract_dict_from_text(text: str) -> Optional[Dict]:
                             return result
                     except (ValueError, SyntaxError):
                         pass
-                    
+
                     # Try JSON parsing
                     try:
                         return json.loads(dict_str)
                     except json.JSONDecodeError:
                         pass
-                    
+
                     break
-    
+
     # Method 4: Handle truncated responses by extracting what we can
     # Look for key-value pairs even if the dict is incomplete
-    if '{' in cleaned:
-        truncated_start = cleaned.find('{')
+    if "{" in cleaned:
+        truncated_start = cleaned.find("{")
         truncated_dict = cleaned[truncated_start:]
-        
+
         # Try to extract at least some key-value pairs
-        summary_match = re.search(r"['\"]summary['\"]\s*:\s*['\"]([^'\"]*)['\"]" , truncated_dict)
-        task_match = re.search(r"['\"]task_completed['\"]\s*:\s*['\"]([^'\"]*)['\"]" , truncated_dict)
-        
+        summary_match = re.search(
+            r"['\"]summary['\"]\s*:\s*['\"]([^'\"]*)['\"]", truncated_dict
+        )
+        task_match = re.search(
+            r"['\"]task_completed['\"]\s*:\s*['\"]([^'\"]*)['\"]", truncated_dict
+        )
+
         if summary_match or task_match:
             # Build a minimal dict from what we can extract
             extracted = {}
             if summary_match:
-                extracted['summary'] = summary_match.group(1)
+                extracted["summary"] = summary_match.group(1)
             if task_match:
-                extracted['task_completed'] = task_match.group(1)
-            
+                extracted["task_completed"] = task_match.group(1)
+
             # Add empty failure_modes if not found
-            if 'failure_modes' not in extracted:
-                extracted['failure_modes'] = {}
-                
+            if "failure_modes" not in extracted:
+                extracted["failure_modes"] = {}
+
             return extracted
-    
+
     # If all methods fail, return None
     return None
 
@@ -195,43 +199,43 @@ FAILURE_MODE_RUBRIC = {
 
 # Output format specification for FailureProcessor classes
 OUTPUT_MODE_RUBRIC = {
-  "failure_modes": {
-    "Instruction Misunderstanding": {
-      "score": 0.0,
-      "evidence": "",
-      "required_skill": "Understand natural language task"
-    },
-    "Command Construction Error": {
-      "score": 0.0,
-      "evidence": "Error message: 'bash: syntax error'",
-      "required_skill": "Build valid commands with correct syntax"
-    },
-    "Environment / System Error": {
-      "score": 0.0,
-      "evidence": "",
-      "required_skill": "Check environment dependencies"
-    },
-    "Execution Logic Error": {
-      "score": 0.0,
-      "evidence": "",
-      "required_skill": "Reason about correct execution order"
-    },
-    "Memory / Context Failure": {
-      "score": 0.0,
-      "evidence": "",
-      "required_skill": "Maintain context across steps"
-    },
-    "Error Recovery Failure": {
-      "score": 0.0,
-      "evidence": "Agent ignored 'command not found' and stopped",
-      "required_skill": "Handle errors and retry adaptively"
-    },
-    "Timeout / Non-Completion": {
-      "score": 1.0,
-      "evidence": "",
-      "required_skill": "Complete within time budget"
+    "failure_modes": {
+        "Instruction Misunderstanding": {
+            "score": 0.0,
+            "evidence": "",
+            "required_skill": "Understand natural language task",
+        },
+        "Command Construction Error": {
+            "score": 0.0,
+            "evidence": "Error message: 'bash: syntax error'",
+            "required_skill": "Build valid commands with correct syntax",
+        },
+        "Environment / System Error": {
+            "score": 0.0,
+            "evidence": "",
+            "required_skill": "Check environment dependencies",
+        },
+        "Execution Logic Error": {
+            "score": 0.0,
+            "evidence": "",
+            "required_skill": "Reason about correct execution order",
+        },
+        "Memory / Context Failure": {
+            "score": 0.0,
+            "evidence": "",
+            "required_skill": "Maintain context across steps",
+        },
+        "Error Recovery Failure": {
+            "score": 0.0,
+            "evidence": "Agent ignored 'command not found' and stopped",
+            "required_skill": "Handle errors and retry adaptively",
+        },
+        "Timeout / Non-Completion": {
+            "score": 1.0,
+            "evidence": "",
+            "required_skill": "Complete within time budget",
+        },
     }
-  }
 }
 
 
@@ -239,7 +243,7 @@ OUTPUT_MODE_RUBRIC = {
 MAST_MERGED_CATEGORIES = {
     "Specification Issues": ["1.1+1.2", "1.3", "1.5"],
     "Communication Misalignment": ["1.4+2.1+2.5", "2.2", "2.3", "2.4", "2.6"],
-    "Task Verification": ["3.1", "3.2", "3.3"]
+    "Task Verification": ["3.1", "3.2", "3.3"],
 }
 
 MAST_MERGED_LABELS = {
@@ -253,7 +257,7 @@ MAST_MERGED_LABELS = {
     "2.6": "Reasoning-action mismatch",
     "3.1": "Premature termination",
     "3.2": "No or incomplete verification",
-    "3.3": "Incorrect verification"
+    "3.3": "Incorrect verification",
 }
 
 # Mapping from original modes to merged modes
@@ -276,9 +280,8 @@ MAST_MODE_MAPPING = {
 }
 
 
-
 def make_failure_prompt(trace: str, task_description: Optional[str] = None, **kwargs):
-  # Convert FAILURE_MODE_RUBRIC to a string format
+    # Convert FAILURE_MODE_RUBRIC to a string format
     rubric_text = ""
     for mode, details in FAILURE_MODE_RUBRIC.items():
         rubric_text += f"\n{mode}:\n"
@@ -373,8 +376,12 @@ Only return valid JSON, no explanations outside of it.
     return prompt
 
 
-def make_mast_prompt(trace: str, task_description: str, definitions: Optional[str] = None, examples: Optional[str] = None):
-
+def make_mast_prompt(
+    trace: str,
+    task_description: str,
+    definitions: Optional[str] = None,
+    examples: Optional[str] = None,
+):
     if definitions is None:
         definitions = open(BASE_DIR / "taxonomies/mast/definitions.txt", "r").read()
     if examples is None:
@@ -425,7 +432,7 @@ def make_mast_prompt(trace: str, task_description: str, definitions: Optional[st
         "2.6 yes \n"
         "3.1 no \n"
         "3.2 yes \n"
-        "3.3 no \n"   
+        "3.3 no \n"
         "Here is the trace: \n"
         f"{trace}"
         "Also, here are the explanations (definitions) of the failure modes and inefficiencies: \n"
@@ -440,15 +447,15 @@ def parse_failure_definitions(text: str, indent: int = 2):
     """
     Parse a taxonomy definitions.txt file and build a structured JSON schema template.
 
-    Each failure mode (e.g., "1.1 Disobey Specification") becomes:
+    Each failure mode (e.g., "1.1 Disobey Specification (Process Compliance)") becomes:
         {
           "label": "<yes | no | unclear>",
-          "evidence": "<short justification>",
-          "confidence_score": <float>
+          "evidence": "<justification>",
+          "confidence_score": "<float>"
         }
     """
 
-    #with open(definitions_path, "r") as f:
+    # with open(definitions_path, "r") as f:
     #    text = f.read()
 
     # Match patterns like "1.1 Disobey Specification (Process Compliance)"
@@ -461,25 +468,90 @@ def parse_failure_definitions(text: str, indent: int = 2):
         failure_modes[key] = {
             "label": "<yes | no | unclear>",
             "evidence": "<justification>",
-            "confidence_score": "<float>"
+            "confidence_score": "<float>",
         }
 
     # Assemble final template
     schema = {
         "summary": "<1–5 sentence factual summary of observed problems or inefficiencies, "
-                   "optionally citing short quotes or episode references "
-                   "(e.g., 'Episode 3: command not found', 'Episode 5: declared success before running tests').>",
+        "optionally citing short quotes or episode references "
+        "(e.g., 'Episode 3: command not found', 'Episode 5: declared success before running tests').>",
         "task_completed": "<yes | no | unclear>",
-        "failure_modes": failure_modes
+        "failure_modes": failure_modes,
     }
 
-    #print(json.dumps(schema, indent=indent, ensure_ascii=False))
+    # print(json.dumps(schema, indent=indent, ensure_ascii=False))
     return schema
 
 
-def make_tb0_prompt(trace: str, task_description: str, definitions: Optional[str] = None, examples: Optional[str] = None, 
-                    reward: Optional[float] = None, verifier_data: Optional[Dict[str, Any]] = None):
+def parse_failure_definitions2(text: str, indent: int = 2) -> Dict[str, Any]:
+    """
+    Parse a taxonomy definitions.txt file with multi-line sections.
+    Produces structured JSON entries for each failure mode.
+    """
 
+    # Match each failure mode header (e.g., "1.1 Disobey Specification (Process Compliance)")
+    pattern = r"(?m)^(?P<code>\d+\.\d+)\s+(?P<name>[A-Za-z0-9’'–—\-\s]+?)\s*\((?P<category>[^)]+)\)"
+    matches = list(re.finditer(pattern, text))
+    if not matches:
+        raise ValueError("No failure mode definitions found. Check formatting.")
+
+    failure_modes = {}
+
+    for i, m in enumerate(matches):
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        section = text[start:end].strip()
+
+        def extract(label):
+            """Extract multiline block following 'Label:'"""
+            pat = rf"{label}:\s*(.*?)(?=\n[A-Z][A-Za-z ]+:|\Z)"
+            found = re.search(pat, section, re.S)
+            if not found:
+                return "" if label in ["Decision Rule", "Definition"] else []
+            text_block = found.group(1).strip()
+            if label in [
+                "Anchor Evidence",
+                "NOT a failure if",
+                "Counterexample (Success)",
+            ]:
+                # Split bullet points
+                bullets = [
+                    re.sub(r"^\s*-\s*", "", l.strip())
+                    for l in text_block.splitlines()
+                    if l.strip()
+                ]
+                return bullets
+            return " ".join(line.strip() for line in text_block.splitlines())
+
+        failure_modes[m.group("code") + " " + m.group("name")] = {
+            "label": "<yes | no | unclear>",
+            "evidence": "<evidence>",
+            "confidence_score": "<float>",
+        }
+
+    schema = {
+        "summary": (
+            "<Episode-by-episode factual summary of reasoning, plans, "
+            "and commands for debugging.>"
+        ),
+        "task_completed": "<yes | no | unclear>",
+        "failure_modes": failure_modes,
+    }
+
+    # Optional: pretty-print for sanity check
+    # print(json.dumps(schema, indent=indent, ensure_ascii=False))
+    return schema
+
+
+def make_tb0_prompt(
+    trace: str,
+    task_description: str,
+    definitions: Optional[str] = None,
+    examples: Optional[str] = None,
+    reward: Optional[float] = None,
+    verifier_data: Optional[Dict[str, Any]] = None,
+):
     if definitions is None:
         definitions = open(BASE_DIR / "taxonomies/tb_v0/definitions.txt", "r").read()
     if examples is None:
@@ -505,7 +577,6 @@ def make_tb0_prompt(trace: str, task_description: str, definitions: Optional[str
     else:
         verifier_section = ""
 
-
     # Format reward information
     reward_section = ""
     if reward is not None:
@@ -515,10 +586,10 @@ def make_tb0_prompt(trace: str, task_description: str, definitions: Optional[str
             reward_section = "\n\n### Task Reward\nTask failed according to verifier."
         else:
             raise ValueError(f"Invalid reward: {reward}")
-            #reward_section = "\n\n### Task Reward\nTask partially completed according to verifier."
+            # reward_section = "\n\n### Task Reward\nTask partially completed according to verifier."
 
     schema = parse_failure_definitions(definitions)
-    
+
     prompt = f"""
 You are an expert in analyzing and evaluating command-line (CLI) traces of autonomous agents performing tasks in an environment.
 Your goal is to identify and classify **failure modes** based solely on observable behavior in the trace.
@@ -674,12 +745,230 @@ Now output the JSON response described above — and **nothing else**. Remember:
     return prompt
 
 
+def make_tb1_prompt(
+    trace: str,
+    task_description: str,
+    definitions: Optional[str] = None,
+    examples: Optional[str] = None,
+    reward: Optional[float] = None,
+    verifier_data: Optional[Dict[str, Any]] = None,
+):
+    """Create TB1 prompt with cleaner separation between system and user messages.
+
+    This prompt assumes more context is in the system message, so the user prompt
+    is more concise and focused on the specific task and trace.
+    """
+
+    if definitions is None:
+        definitions = open(BASE_DIR / "taxonomies/tb_v0/definitions.txt", "r").read()
+    if examples is None:
+        examples = open(BASE_DIR / "taxonomies/tb_v0/examples.txt", "r").read()
+
+    # Parse definitions to get the schema
+    schema = parse_failure_definitions(definitions)
+
+    # Format verifier data concisely
+    verifier_info = []
+    if verifier_data:
+        for fname, content in verifier_data.items():
+            if (
+                isinstance(content, str)
+                and "reward" not in fname.lower()
+                and content.strip()
+            ):
+                verifier_info.append(f"{fname}: {content[:200].strip()}")
+
+    # Format reward
+    if reward == 1.0:
+        reward_text = "Task completed successfully according to verifier."
+    elif reward == 0.0:
+        reward_text = "Task failed according to verifier."
+    else:
+        raise ValueError(f"Invalid reward: {reward}")
+
+    prompt = f"""{reward_text}
+{("Verifier: " + " | ".join(verifier_info)) if verifier_info else ""}
+
+## Failure Mode Definitions
+{definitions}
+
+## Examples of Failure Modes
+{examples}
+
+## Expected JSON Output
+{json.dumps(schema, indent=2)}
+
+## Trace
+{trace}
+
+Analyze the trace for failure modes. Output only valid JSON matching the schema above."""
+
+    return prompt
+
+
+def make_tb1_refined_prompt(
+    trace: str,
+    task_description: str,
+    definitions: Optional[str] = None,
+    examples: Optional[str] = None,
+    reward: Optional[float] = None,
+    verifier_data: Optional[Dict[str, Any]] = None,
+):
+    """Create TB1 refined prompt with targeted examples for problematic modes.
+
+    Uses refined examples focusing on quality over quantity.
+    """
+
+    if definitions is None:
+        definitions = open(BASE_DIR / "taxonomies/tb_v0/definitions.txt", "r").read()
+    if examples is None:
+        # Use refined examples instead of comprehensive ones
+        examples = open(BASE_DIR / "taxonomies/tb_v0/examples_refined.txt", "r").read()
+
+    # Parse definitions to get the schema
+    schema = parse_failure_definitions(definitions)
+
+    # Format verifier data concisely
+    verifier_info = []
+    if verifier_data:
+        for fname, content in verifier_data.items():
+            if (
+                isinstance(content, str)
+                and "reward" not in fname.lower()
+                and content.strip()
+            ):
+                verifier_info.append(f"{fname}: {content[:200].strip()}")
+
+    # Format reward
+    if reward == 1.0:
+        reward_text = "Task completed successfully according to verifier."
+    elif reward == 0.0:
+        reward_text = "Task failed according to verifier."
+    else:
+        raise ValueError(f"Invalid reward: {reward}")
+
+    prompt = f"""{reward_text}
+{("Verifier: " + " | ".join(verifier_info)) if verifier_info else ""}
+
+## Failure Mode Definitions
+{definitions}
+
+## Examples
+{examples}
+
+## Expected JSON Output
+{json.dumps(schema, indent=2)}
+
+## Trace
+{trace}
+
+## End of Trace
+
+Analyze the trace for failure modes. Output only valid JSON matching the schema above."""
+
+    return prompt
+
+
+def make_tb2_prompt(
+    trace: str,
+    task_description: Optional[str] = None,
+    definitions: Optional[str] = None,
+    examples: Optional[str] = None,
+    reward: Optional[float] = None,
+    verifier_data: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Create TB2 prompt that relies on system message for defs/examples/schema."""
+
+    # Allow callers to pass file paths for any text inputs
+    def _load_if_file(value: Optional[str]) -> Optional[str]:
+        if not isinstance(value, str):
+            return value
+        try:
+            from pathlib import Path
+
+            p = Path(value)
+            if p.exists() and p.is_file():
+                return p.read_text()
+        except Exception:
+            pass
+        return value
+
+    task_description = _load_if_file(task_description)
+    definitions = _load_if_file(definitions)
+    examples = _load_if_file(examples)
+
+    # Build header information
+    header_parts = []
+
+    # Add reward information
+    if reward is not None:
+        if reward == 1.0:
+            header_parts.append("Task completed successfully according to verifier.")
+        elif reward == 0.0:
+            header_parts.append("Task failed according to verifier.")
+
+    # Add verifier data
+    if verifier_data:
+        verifier_info = []
+        for fname, content in verifier_data.items():
+            if (
+                not isinstance(content, str)
+                or not content.strip()
+                or "reward" in fname.lower()
+            ):
+                continue
+
+            # Extract short test summary info, skip if not present
+            short_test_summary_info = "=========================== short test summary info ============================"
+            if short_test_summary_info in content:
+                summary_lines = content.split(short_test_summary_info)[1].split("\n")[
+                    1:
+                ]
+                verifier_info.append("\n".join(summary_lines))
+
+        if verifier_info:
+            header_parts.append("Verifier Information: " + "\n".join(verifier_info))
+
+    # Build the complete prompt
+    prompt_parts = []
+
+    # Add header
+    if header_parts:
+        prompt_parts.extend(header_parts)
+        prompt_parts.append("")  # Empty line after header
+
+    # Add task description if provided
+    if task_description:
+        prompt_parts.append(f"## Task Description\n{task_description}\n")
+
+    # Add definitions if provided
+    if definitions:
+        prompt_parts.append(f"## Failure Mode Definitions\n{definitions}\n")
+
+    # Add examples if provided
+    if examples:
+        prompt_parts.append(f"## Examples of Failure Modes\n{examples}\n")
+
+    # Add trace
+    prompt_parts.append(f"## Trace\n{trace}\n")
+    prompt_parts.append("## End of Trace\n")
+
+    # Add instruction
+    prompt_parts.append(
+        "## Analyze the trace for failure modes. Output only valid JSON matching the schema above."
+    )
+
+    return "\n".join(prompt_parts)
+
 
 MAKE_FAILURE_PROMPTS = {
     "base": make_failure_prompt,
     "mast": make_mast_prompt,
     "timeout": make_timeout_prompt,
-    "tb0" : make_tb0_prompt,
+    "tb0": make_tb0_prompt,
+    "tb1": make_tb1_prompt,
+    "tb1_refined": make_tb1_refined_prompt,
+    "tb2": make_tb2_prompt,
 }
 
 
@@ -694,7 +983,7 @@ def parse_response_base(response: str) -> Dict[str, any]:
     if cleaned_response.endswith("```"):
         cleaned_response = cleaned_response[:-3]
     cleaned_response = cleaned_response.strip()
-    
+
     # Try to extract dictionary if there's extra text
     json_obj = extract_dict_from_text(cleaned_response)
     if json_obj is None:
@@ -713,8 +1002,12 @@ def parse_response_base(response: str) -> Dict[str, any]:
     
     failure_modes = result.get("failure_modes", {})
     # Validate keys if we got valid failure modes
-    if failure_modes and hasattr(OUTPUT_MODE_RUBRIC.get('failure_modes', {}), 'keys'):
-        invalid_keys = [key for key in failure_modes.keys() if key not in OUTPUT_MODE_RUBRIC['failure_modes'].keys()]
+    if failure_modes and hasattr(OUTPUT_MODE_RUBRIC.get("failure_modes", {}), "keys"):
+        invalid_keys = [
+            key
+            for key in failure_modes.keys()
+            if key not in OUTPUT_MODE_RUBRIC["failure_modes"].keys()
+        ]
         if invalid_keys:
             print(f"WARNING: Invalid failure mode keys found: {invalid_keys}")
     return failure_modes
@@ -760,38 +1053,42 @@ def parse_response_mast(response: str) -> Tuple[Dict[str, any], str]:
                 # Format with C prefix and newlines
                 rf"C\.{mode}\s*\n\s*(yes|no)"
             ]
-            
+
             found = False
             score = 0
             
             for pattern in patterns:
-                matches = re.findall(pattern, cleaned_response, re.IGNORECASE | re.DOTALL)
+                matches = re.findall(
+                    pattern, cleaned_response, re.IGNORECASE | re.DOTALL
+                )
                 if matches:
                     # Use the first match
-                    score = 1 if matches[0].lower() == 'yes' else 0
+                    score = 1 if matches[0].lower() == "yes" else 0
                     found = True
                     break
-            
+
             if not found:
                 # If we still can't find a match, try a more general approach
                 general_pattern = rf"(?:C\.)?{mode}.*?(yes|no)"
-                match = re.search(general_pattern, cleaned_response, re.IGNORECASE | re.DOTALL)
-                
+                match = re.search(
+                    general_pattern, cleaned_response, re.IGNORECASE | re.DOTALL
+                )
+
                 if match:
-                    score = 1 if match.group(1).lower() == 'yes' else 0
+                    score = 1 if match.group(1).lower() == "yes" else 0
                     found = True
-                    
+
             if not found:
                 # If all attempts fail, default to 'no'
                 print(f"Warning: Could not find mode {mode} in response")
                 score = 0
-            
+
             # Store just the score for backward compatibility
             # Evidence and required_skill are now in the full_analysis text
             failure_modes[mode] = {
-                'score': float(score),
-                'evidence': '',  # Will be extracted from full_analysis when needed
-                'required_skill': ''  # Will be extracted from full_analysis when needed
+                "score": float(score),
+                "evidence": "",  # Will be extracted from full_analysis when needed
+                "required_skill": "",  # Will be extracted from full_analysis when needed
             }
 
     except Exception as e:
@@ -810,7 +1107,7 @@ def parse_response_timeout(response: str) -> Dict[str, Any]:
     if cleaned_response.endswith("```"):
         cleaned_response = cleaned_response[:-3]
     cleaned_response = cleaned_response.strip()
-    
+
     # Try to extract dictionary if there's extra text
     json_obj = extract_dict_from_text(cleaned_response)
     if json_obj is None:
@@ -820,11 +1117,13 @@ def parse_response_timeout(response: str) -> Dict[str, Any]:
             print(f"ERROR: Failed to parse timeout JSON: {e}")
             print(f"Response was: {repr(cleaned_response[:500])}...")
             # Return default structure on parse error
-            return {mode: {'score': 0, 'evidence': '', 'required_skill': ''} 
-                   for mode in TIMEOUT_FAILURE_RUBRIC.keys()}
+            return {
+                mode: {"score": 0, "evidence": "", "required_skill": ""}
+                for mode in TIMEOUT_FAILURE_RUBRIC.keys()
+            }
     else:
         result = json_obj
-    
+
     failure_modes = result.get("failure_modes", {})
 
     expected = set(TIMEOUT_FAILURE_RUBRIC.keys())
@@ -836,7 +1135,7 @@ def parse_response_timeout(response: str) -> Dict[str, Any]:
     if missing:
         print(f"WARNING: Missing failure mode(s): {missing}, adding with score=0")
         for mode in missing:
-            failure_modes[mode] = {'score': 0, 'evidence': '', 'required_skill': ''}
+            failure_modes[mode] = {"score": 0, "evidence": "", "required_skill": ""}
     if extra:
         print(f"Warning: Unexpected failure mode(s): {extra}")
 
@@ -845,49 +1144,59 @@ def parse_response_timeout(response: str) -> Dict[str, Any]:
 
 def parse_response_tb0(response: str) -> Tuple[Dict[str, any], str]:
     """Parse TB0 response to extract failure modes and analysis.
-    
+
     This function uses ast.literal_eval to handle Python dict format responses
     as well as JSON format responses.
-    
+
     Returns:
         Tuple of (failure_modes_dict, full_analysis_text)
     """
     try:
         # Extract dictionary from response (handles both JSON and Python dict format)
         result = extract_dict_from_text(response)
-        
+
         if result is None:
             # If extraction completely failed, try to extract key info with regex
-            print(f"Warning: Could not parse TB0 response, attempting regex extraction")
+            print("Warning: Could not parse TB0 response, attempting regex extraction")
             print(f"Response preview: {response[:200]}...")
-            
+
             # Try to extract at least the summary if present
-            summary_match = re.search(r"['\"]summary['\"]\s*:\s*['\"]([^'\"]*)['\"]" , response)
-            task_match = re.search(r"['\"]task_completed['\"]\s*:\s*['\"]([^'\"]*)['\"]" , response)
-            
-            summary = summary_match.group(1) if summary_match else "Failed to parse response"
+            summary_match = re.search(
+                r"['\"]summary['\"]\s*:\s*['\"]([^'\"]*)['\"]", response
+            )
+            task_match = re.search(
+                r"['\"]task_completed['\"]\s*:\s*['\"]([^'\"]*)['\"]", response
+            )
+
+            summary = (
+                summary_match.group(1) if summary_match else "Failed to parse response"
+            )
             task_completed = task_match.group(1) if task_match else "unclear"
-            
+
             # Return empty failure modes with the extracted info
-            return {}, f"Summary: {summary}\nTask Completed: {task_completed}\n[Parse Error: Could not extract full response]"
-        
+            return (
+                {},
+                f"Summary: {summary}\nTask Completed: {task_completed}\n[Parse Error: Could not extract full response]",
+            )
+
         # Extract summary and task_completed
         summary = result.get("summary", "")
+        per_episode_summary = result.get("per_episode_summary", "")
         task_completed = result.get("task_completed", "unclear")
-        
+
         # Extract failure modes
         failure_modes_raw = result.get("failure_modes", {})
-        
+
         # Convert to standardized format
         failure_modes = {}
         for mode_name, mode_data in failure_modes_raw.items():
             # Handle case where mode_data might be a string or other simple type
             if not isinstance(mode_data, dict):
                 mode_data = {"label": str(mode_data)}
-                
+
             # Extract mode number (e.g., "1.1" from "1.1 Disobey Specification")
-            mode_num = mode_name.split()[0] if ' ' in mode_name else mode_name
-            
+            mode_num = mode_name.split()[0] if " " in mode_name else mode_name
+
             # Convert label to score
             label = str(mode_data.get("label", "no")).lower()
             if label in ["yes", "true", "1"]:
@@ -896,32 +1205,34 @@ def parse_response_tb0(response: str) -> Tuple[Dict[str, any], str]:
                 score = 0.5
             else:
                 score = 0.0
-            
-            # Use confidence_score if provided, otherwise use converted score    
+
+            # Use confidence_score if provided, otherwise use converted score
             confidence = mode_data.get("confidence_score", score)
-            
+
             failure_modes[mode_num] = {
                 "score": score,
-                'confidence': confidence,
-                'evidence': mode_data.get("evidence", "") if isinstance(mode_data, dict) else "",
-                'required_skill': mode_data.get("required_skill", "") if isinstance(mode_data, dict) else ""
+                "confidence": confidence,
+                "evidence": mode_data.get("evidence", "")
+                if isinstance(mode_data, dict)
+                else "",
             }
-        
+
+            if mode_data.get("anchors"):
+                failure_modes[mode_num]["anchors"] = mode_data.get("anchors", [])
+            if mode_data.get("rationale"):
+                failure_modes[mode_num]["rationale"] = mode_data.get("rationale", "")
+            if mode_data.get("required_skill"):
+                failure_modes[mode_num]["required_skill"] = mode_data.get(
+                    "required_skill", ""
+                )
+
         # Create full analysis text combining all information
-        full_analysis = f"Summary: {summary}\nTask Completed: {task_completed}\n"
-        for mode_name, mode_data in failure_modes_raw.items():
-            if isinstance(mode_data, dict):
-                full_analysis += f"{mode_name}: {mode_data.get('label', 'no')}"
-                if mode_data.get('evidence'):
-                    full_analysis += f" - {mode_data['evidence']}"
-            else:
-                full_analysis += f"{mode_name}: {mode_data}"
-            full_analysis += "\n"
-        
+        full_analysis = f"Overall Summary: {summary}\n Per-Episode Summary: {per_episode_summary}\n Task Completed: {task_completed}\n"
+
         return failure_modes, full_analysis
-        
+
     except Exception as e:
-        print(f"ERROR: Unexpected error parsing TB0 response: {e}") 
+        print(f"ERROR: Unexpected error parsing TB0 response: {e}")
         print(f"Response was: {repr(response[:300])}")
         # Return empty failure modes with error information
         return {}, f"[Parse Error: {str(e)}]\n"
@@ -931,12 +1242,16 @@ PARSE_RESPONSE_FUNCTIONS = {
     "base": parse_response_base,
     "mast": parse_response_mast,
     "tb0": parse_response_tb0,
-    "timeout": parse_response_timeout
+    "tb1": parse_response_tb0,
+    "tb1_refined": parse_response_tb0,  # Uses same parser as tb0/tb1
+    "tb1_mode22": parse_response_tb0,  # Uses same parser for Mode 2.2 enhanced
+    "tb1_mode22_correct": parse_response_tb0,  # Uses same parser for corrected Mode 2.2
+    "tb2": parse_response_tb0,
+    "timeout": parse_response_timeout,
 }
 
 if __name__ == "__main__":
-
     trace = "Task: copy file A to B \n "
-    
+
     prompt = MAKE_FAILURE_PROMPTS["mast"](trace)
     print(prompt)

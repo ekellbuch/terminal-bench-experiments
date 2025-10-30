@@ -85,7 +85,7 @@ The agent intentionally revisits or corrects earlier reasoning while explicitly 
 
 2.2 Information Withholding (Coordination Flow)
 
-Decision Rule: Did the agent fail to share known relevant information with another agent or system component that required it?
+Decision Rule: Did the agent fail to share known relevant information when it was required?
 Definition: The agent retains information critical for progress, causing redundancy or miscoordination.
 Anchor Evidence:
 - One agent identifies an error but never passes it to another.
