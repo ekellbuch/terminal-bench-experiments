@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import matplotlib
+from typing import Iterable
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -30,14 +31,34 @@ from util_scores import connect_to_database, get_model_task_scores, filter_descr
 from name_remapping import model_names, agent_name_map
 
 
-def create_agent_model_heatmap(df, output_path, trial_filter="with_timeouts"):
+def save_figure_in_formats(base_path: Path, formats: Iterable[str], **savefig_kwargs):
+    """Save the current matplotlib figure to each requested format."""
+    saved_paths = []
+    normalized_formats = []
+    for fmt in formats:
+        if not fmt:
+            continue
+        normalized_formats.append(fmt.lower())
+    if not normalized_formats:
+        raise ValueError("At least one output format must be provided.")
+
+    for fmt in normalized_formats:
+        target_path = base_path.with_suffix(f".{fmt}")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(target_path, format=fmt, **savefig_kwargs)
+        saved_paths.append(target_path)
+    return saved_paths
+
+
+def create_agent_model_heatmap(df, output_base_path, trial_filter="with_timeouts", output_formats=("svg",)):
     """
     Create a heatmap showing model performance across different agents (transposed).
     
     Args:
         df: DataFrame with columns [agent_name, model_name, task_name, avg_reward]
-        output_path: Path to save the heatmap image
+        output_base_path: Base path to save the heatmap image (extension added per format)
         trial_filter: Trial filtering mode for title display
+        output_formats: Iterable of output formats to generate (e.g., ("svg", "pdf"))
     """
     print("\n" + "="*80)
     print("Creating model vs agent performance heatmap (transposed)...")
@@ -46,8 +67,8 @@ def create_agent_model_heatmap(df, output_path, trial_filter="with_timeouts"):
     # Calculate average performance for each agent-model combination across all tasks
     agent_model_performance = df.groupby(['agent_name', 'model_name'])['avg_reward'].mean().reset_index()
     
-    # Convert to failure rate (1 - avg_reward)
-    agent_model_performance['failure_rate'] = 1 - agent_model_performance['avg_reward']
+    # Use success rate (avg_reward)
+    agent_model_performance['success_rate'] = agent_model_performance['avg_reward']
     
     # Apply name remapping
     agent_model_performance['model_display_name'] = agent_model_performance['model_name'].map(model_names).fillna(agent_model_performance['model_name'])
@@ -57,7 +78,7 @@ def create_agent_model_heatmap(df, output_path, trial_filter="with_timeouts"):
     matrix = agent_model_performance.pivot_table(
         index='model_display_name',
         columns='agent_display_name',
-        values='failure_rate',
+        values='success_rate',
         aggfunc='mean'
     )
     
@@ -67,17 +88,17 @@ def create_agent_model_heatmap(df, output_path, trial_filter="with_timeouts"):
     
     print(f"Matrix shape: {matrix.shape} (models x agents)")
     
-    # Sort agents by minimum failure rate (best to worst), ignoring NaN
-    agent_min_failure = matrix.min(axis=0, skipna=True).sort_values(ascending=True)
-    agent_order = agent_min_failure.index
-    
-    # Sort models by minimum failure rate (best to worst), ignoring NaN
-    model_min_failure = matrix.min(axis=1, skipna=True).sort_values(ascending=True)
-    model_order = model_min_failure.index
-    
+    # Sort agents by maximum success rate (best to worst), ignoring NaN
+    agent_max_success = matrix.max(axis=0, skipna=True).sort_values(ascending=False)
+    agent_order = agent_max_success.index
+
+    # Sort models by maximum success rate (best to worst), ignoring NaN
+    model_max_success = matrix.max(axis=1, skipna=True).sort_values(ascending=False)
+    model_order = model_max_success.index
+
     # Also keep average for reporting
-    model_avg_failure = matrix.mean(axis=1, skipna=True)
-    agent_avg_failure = matrix.mean(axis=0, skipna=True)
+    model_avg_success = matrix.mean(axis=1, skipna=True)
+    agent_avg_success = matrix.mean(axis=0, skipna=True)
     
     # Reorder matrix with sorted models and agents (keep NaN values)
     reordered_matrix = matrix.loc[model_order, agent_order]
@@ -86,20 +107,21 @@ def create_agent_model_heatmap(df, output_path, trial_filter="with_timeouts"):
     fig_width = max(12, len(agent_order) * 1.2)
     fig_height = max(8, len(model_order) * 0.8)
     
-    # Create figure
-    plt.figure(figsize=(fig_width, fig_height))
-    
+    # Create figure with constrained layout for better spacing
+    plt.figure(figsize=(fig_width, fig_height), constrained_layout=True)
+
     # Create heatmap with NaN values shown as blank
     ax = sns.heatmap(
         reordered_matrix,
-        cmap='RdBu_r',  # Seaborn's RdBu_r: red for high failure rate, blue for low failure rate
+        cmap='RdBu',  # Seaborn's RdBu: blue for high success rate, red for low success rate
         vmin=0,
         vmax=1,
         cbar_kws={
-            'label': 'Failure Rate',
-            'shrink': 0.8,
-            'orientation': 'horizontal',
-            'pad': 0.1
+            'label': 'Average Success Rate',
+            'shrink': 0.7,
+            'orientation': 'vertical',
+            'pad': 0.05,
+            'aspect': 30
         },
         linewidths=1.5,
         linecolor='white',
@@ -107,49 +129,52 @@ def create_agent_model_heatmap(df, output_path, trial_filter="with_timeouts"):
         yticklabels=True,
         annot=True,
         fmt='.2f',
-        annot_kws={'size': 12, 'weight': 'bold'},
+        annot_kws={'size': 11},
         mask=reordered_matrix.isna()  # Mask NaN values to show as blank
     )
-    
-    # Move colorbar to top
+
+    # Make colorbar label bigger
     cbar = ax.collections[0].colorbar
-    cbar.ax.xaxis.set_ticks_position('top')
-    cbar.ax.xaxis.set_label_position('top')
-    
+    cbar.set_label('Average Success Rate', fontsize=14)
+
     # Create title with trial filter information
     filter_desc = filter_descriptions.get(trial_filter, trial_filter)
     
     # Customize the plot
-    plt.suptitle(f'Model Performance Across Agents ({filter_desc})', 
-                fontsize=18, fontweight='bold', y=0.98)
-    plt.xlabel('Agents (sorted by best performance)', fontsize=14, fontweight='bold')
-    plt.ylabel('Models (sorted by best performance)', fontsize=14, fontweight='bold')
+    plt.suptitle(f'Model Performance Across Agents ({filter_desc})',
+                fontsize=18, fontweight='bold')
+    plt.xlabel('Agents (sorted by success rate, descending)', fontsize=16)
+    plt.ylabel('Models (sorted by success rate, descending)', fontsize=16)
     
-    # Rotate x-axis labels for better readability
-    plt.xticks(rotation=45, ha='right', fontsize=12, fontweight='bold')
-    plt.yticks(fontsize=12, fontweight='bold')
-    
-    # Adjust layout
-    plt.tight_layout()
-    
-    # Save the figure
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"Agent-Model heatmap saved to: {output_path}")
+    # Rotate x-axis labels for better readability with larger fonts
+    plt.xticks(rotation=45, ha='right', fontsize=14)
+    plt.yticks(fontsize=14)
+
+    # Save the figure with publication quality DPI and padding
+    saved_paths = save_figure_in_formats(
+        output_base_path,
+        output_formats,
+        dpi=300,
+        bbox_inches='tight',
+        pad_inches=0.2
+    )
+    for path in saved_paths:
+        print(f"Agent-Model heatmap saved to: {path}")
     
     # Print insights
     print("\nModel-Agent Performance Insights:")
-    print(f"- Best agent by min failure rate: {agent_order[0]} "
-          f"(min: {agent_min_failure.loc[agent_order[0]]:.3f}, "
-          f"avg: {agent_avg_failure.loc[agent_order[0]]:.3f})")
-    print(f"- Best model by min failure rate: {model_order[0]} "
-          f"(min: {model_min_failure.loc[model_order[0]]:.3f}, "
-          f"avg: {model_avg_failure.loc[model_order[0]]:.3f})")
-    
-    # Find best model-agent combination (lowest failure rate)
-    best_value = reordered_matrix.min().min()
-    best_location = reordered_matrix.stack().idxmin()
+    print(f"- Best agent by max success rate: {agent_order[0]} "
+          f"(max: {agent_max_success.loc[agent_order[0]]:.3f}, "
+          f"avg: {agent_avg_success.loc[agent_order[0]]:.3f})")
+    print(f"- Best model by max success rate: {model_order[0]} "
+          f"(max: {model_max_success.loc[model_order[0]]:.3f}, "
+          f"avg: {model_avg_success.loc[model_order[0]]:.3f})")
+
+    # Find best model-agent combination (highest success rate)
+    best_value = reordered_matrix.max().max()
+    best_location = reordered_matrix.stack().idxmax()
     print(f"- Best model-agent combination: {best_location[0]} + {best_location[1]} "
-          f"(failure rate: {best_value:.3f})")
+          f"(success rate: {best_value:.3f})")
     
     # Close the figure
     plt.close()
@@ -157,15 +182,22 @@ def create_agent_model_heatmap(df, output_path, trial_filter="with_timeouts"):
     return True
 
 
-def create_model_task_heatmap(df, output_path, trial_filter="with_timeouts", specific_agent=None):
+def create_model_task_heatmap(
+    df,
+    output_base_path,
+    trial_filter="with_timeouts",
+    specific_agent=None,
+    output_formats=("svg",)
+):
     """
     Create a heatmap showing task performance across models (tasks x models matrix - transposed).
     
     Args:
         df: DataFrame with columns [agent_name, model_name, task_name, avg_reward]
-        output_path: Path to save the heatmap image
+        output_base_path: Base path to save the heatmap image (extension added per format)
         trial_filter: Trial filtering mode for title display
         specific_agent: If provided, only include data for this agent
+        output_formats: Iterable of output formats to generate (e.g., ("svg", "pdf"))
     """
     print("\n" + "="*80)
     if specific_agent:
@@ -186,8 +218,8 @@ def create_model_task_heatmap(df, output_path, trial_filter="with_timeouts", spe
     # Otherwise, it's across all agents
     model_task_performance = df.groupby(['model_name', 'task_name'])['avg_reward'].mean().reset_index()
     
-    # Convert to failure rate (1 - avg_reward)
-    model_task_performance['failure_rate'] = 1 - model_task_performance['avg_reward']
+    # Use success rate (avg_reward)
+    model_task_performance['success_rate'] = model_task_performance['avg_reward']
     
     # Apply model name remapping
     model_task_performance['model_display_name'] = model_task_performance['model_name'].map(model_names).fillna(model_task_performance['model_name'])
@@ -195,8 +227,8 @@ def create_model_task_heatmap(df, output_path, trial_filter="with_timeouts", spe
     # Create pivot table with tasks as rows and models as columns (transposed)
     matrix = model_task_performance.pivot_table(
         index='task_name',
-        columns='model_display_name', 
-        values='failure_rate',
+        columns='model_display_name',
+        values='success_rate',
         aggfunc='mean'
     )
     
@@ -206,16 +238,16 @@ def create_model_task_heatmap(df, output_path, trial_filter="with_timeouts", spe
     
     print(f"Matrix shape: {matrix.shape} (tasks x models)")
     
-    # Fill NaN values with 1 for processing (highest failure rate for missing data)
-    matrix_filled = matrix.fillna(1)
+    # Fill NaN values with 0 for processing (lowest success rate for missing data)
+    matrix_filled = matrix.fillna(0)
     
-    # Sort models by average failure rate (best to worst)
-    model_avg_failure = matrix_filled.mean(axis=0).sort_values(ascending=True)
-    col_order = model_avg_failure.index
-    
-    # Sort tasks by average difficulty (hardest to easiest - highest failure rate first)
-    task_avg_failure = matrix_filled.mean(axis=1).sort_values(ascending=False)
-    row_order = task_avg_failure.index
+    # Sort models by average success rate (best to worst)
+    model_avg_success = matrix_filled.mean(axis=0).sort_values(ascending=False)
+    col_order = model_avg_success.index
+
+    # Sort tasks by average difficulty (easiest to hardest - highest success rate first)
+    task_avg_success = matrix_filled.mean(axis=1).sort_values(ascending=False)
+    row_order = task_avg_success.index
     
     # Create final matrix with sorted tasks and models
     reordered_matrix = matrix_filled.loc[row_order, col_order]
@@ -224,20 +256,21 @@ def create_model_task_heatmap(df, output_path, trial_filter="with_timeouts", spe
     fig_width = min(max(14, matrix_filled.shape[1] * 0.8), 50)
     fig_height = min(max(10, matrix_filled.shape[0] * 0.3), 30)
     
-    # Create figure
-    plt.figure(figsize=(fig_width, fig_height))
-    
+    # Create figure with constrained layout for better spacing
+    plt.figure(figsize=(fig_width, fig_height), constrained_layout=True)
+
     # Create heatmap
     ax = sns.heatmap(
         reordered_matrix,
-        cmap='RdBu_r',  # Seaborn's RdBu_r: red for high failure rate, blue for low failure rate
+        cmap='RdBu',  # Seaborn's RdBu: blue for high success rate, red for low success rate
         vmin=0,
         vmax=1,
         cbar_kws={
-            'label': 'Failure Rate',
-            'shrink': 0.8,
-            'orientation': 'horizontal',
-            'pad': 0.1
+            'label': 'Average Success Rate',
+            'shrink': 0.7,
+            'orientation': 'vertical',
+            'pad': 0.05,
+            'aspect': 30
         },
         linewidths=1.0,
         linecolor='white',
@@ -245,12 +278,11 @@ def create_model_task_heatmap(df, output_path, trial_filter="with_timeouts", spe
         yticklabels=True,
         annot=False
     )
-    
-    # Move colorbar to top
+
+    # Make colorbar label bigger
     cbar = ax.collections[0].colorbar
-    cbar.ax.xaxis.set_ticks_position('top')
-    cbar.ax.xaxis.set_label_position('top')
-    
+    cbar.set_label('Average Success Rate', fontsize=14)
+
     # Create title with trial filter and agent information
     filter_desc = filter_descriptions.get(trial_filter, trial_filter)
     
@@ -261,31 +293,35 @@ def create_model_task_heatmap(df, output_path, trial_filter="with_timeouts", spe
         title = f'Task Performance Across Models - {agent_display_name} ({filter_desc})'
     else:
         title = f'Task Performance Across Models - All Agents ({filter_desc})'
-    plt.suptitle(title, fontsize=18, fontweight='bold', y=0.98)
-    plt.xlabel('Models (sorted by performance: best → worst →)', fontsize=14, fontweight='bold')
-    plt.ylabel('Tasks (sorted by difficulty: hard → easy ↓)', fontsize=14, fontweight='bold')
+    plt.suptitle(title, fontsize=18, fontweight='bold')
+    plt.xlabel('Models (sorted by success rate, descending)', fontsize=16)
+    plt.ylabel('Tasks (sorted by success rate, descending)', fontsize=16)
     
-    # Rotate x-axis labels for better readability
-    plt.xticks(rotation=45, ha='right', fontsize=12, fontweight='bold')
-    plt.yticks(fontsize=10, fontweight='bold')
-    
-    # Adjust layout
-    plt.tight_layout()
-    
-    # Save the figure
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"Model-Task heatmap saved to: {output_path}")
+    # Rotate x-axis labels for better readability with larger fonts
+    plt.xticks(rotation=45, ha='right', fontsize=14)
+    plt.yticks(fontsize=12)
+
+    # Save the figure with publication quality DPI and padding
+    saved_paths = save_figure_in_formats(
+        output_base_path,
+        output_formats,
+        dpi=300,
+        bbox_inches='tight',
+        pad_inches=0.2
+    )
+    for path in saved_paths:
+        print(f"Model-Task heatmap saved to: {path}")
     
     # Print insights
     print("\nTask-Model Performance Insights:")
-    print(f"- Best performing model: {model_avg_failure.index[0]} "
-          f"(avg failure rate: {model_avg_failure.iloc[0]:.3f})")
-    print(f"- Worst performing model: {model_avg_failure.index[-1]} "
-          f"(avg failure rate: {model_avg_failure.iloc[-1]:.3f})")
-    print(f"- Hardest task: {task_avg_failure.index[0]} "
-          f"(avg failure rate: {task_avg_failure.iloc[0]:.3f})")
-    print(f"- Easiest task: {task_avg_failure.index[-1]} "
-          f"(avg failure rate: {task_avg_failure.iloc[-1]:.3f})")
+    print(f"- Best performing model: {model_avg_success.index[0]} "
+          f"(avg success rate: {model_avg_success.iloc[0]:.3f})")
+    print(f"- Worst performing model: {model_avg_success.index[-1]} "
+          f"(avg success rate: {model_avg_success.iloc[-1]:.3f})")
+    print(f"- Easiest task: {task_avg_success.index[0]} "
+          f"(avg success rate: {task_avg_success.iloc[0]:.3f})")
+    print(f"- Hardest task: {task_avg_success.index[-1]} "
+          f"(avg success rate: {task_avg_success.iloc[-1]:.3f})")
     
     # Close the figure
     plt.close()
@@ -293,14 +329,15 @@ def create_model_task_heatmap(df, output_path, trial_filter="with_timeouts", spe
     return True
 
 
-def create_trial_count_heatmap(df, output_path, trial_filter="with_timeouts"):
+def create_trial_count_heatmap(df, output_base_path, trial_filter="with_timeouts", output_formats=("svg",)):
     """
     Create a heatmap showing number of trials per task per agent/model combination.
     
     Args:
         df: DataFrame with columns [agent_name, model_name, task_name, num_trials]
-        output_path: Path to save the heatmap image
+        output_base_path: Base path to save the heatmap image (extension added per format)
         trial_filter: Trial filtering mode for title display
+        output_formats: Iterable of output formats to generate (e.g., ("svg", "pdf"))
     """
     print("\n" + "="*80)
     print("Creating trial count heatmap...")
@@ -346,11 +383,11 @@ def create_trial_count_heatmap(df, output_path, trial_filter="with_timeouts"):
     fig_width = min(max(15, matrix.shape[1] * 0.2), 50)
     fig_height = min(max(10, matrix.shape[0] * 0.3), 30)
     
-    # Create figure
-    plt.figure(figsize=(fig_width, fig_height))
-    
+    # Create figure with constrained layout for better spacing
+    plt.figure(figsize=(fig_width, fig_height), constrained_layout=True)
+
     # Using seaborn's Blues colormap which handles 0 values well
-    
+
     # Create heatmap
     ax = sns.heatmap(
         reordered_matrix,
@@ -359,9 +396,10 @@ def create_trial_count_heatmap(df, output_path, trial_filter="with_timeouts"):
         vmax=reordered_matrix.max().max(),
         cbar_kws={
             'label': 'Number of Trials',
-            'shrink': 0.8,
-            'orientation': 'horizontal',
-            'pad': 0.1
+            'shrink': 0.7,
+            'orientation': 'vertical',
+            'pad': 0.05,
+            'aspect': 30
         },
         linewidths=1.0,
         linecolor='white',
@@ -370,31 +408,34 @@ def create_trial_count_heatmap(df, output_path, trial_filter="with_timeouts"):
         annot=False,  # Don't annotate due to size
         fmt='d'
     )
-    
-    # Move colorbar to top
+
+    # Make colorbar label bigger
     cbar = ax.collections[0].colorbar
-    cbar.ax.xaxis.set_ticks_position('top')
-    cbar.ax.xaxis.set_label_position('top')
-    
+    cbar.set_label('Number of Trials', fontsize=14)
+
     # Create title with trial filter information
     filter_desc = filter_descriptions.get(trial_filter, trial_filter)
     
     # Customize the plot
-    plt.suptitle(f'Number of Trials per Task per Agent/Model Combination ({filter_desc})', 
-                fontsize=16, fontweight='bold', y=0.98)
-    plt.xlabel('Tasks (sorted by total trial count: high → low →)', fontsize=12)
-    plt.ylabel('Agent + Model Combinations (sorted by total trial count: high → low ↓)', fontsize=12)
+    plt.suptitle(f'Number of Trials per Task per Agent/Model Combination ({filter_desc})',
+                fontsize=16, fontweight='bold')
+    plt.xlabel('Tasks (sorted by trial count, descending)', fontsize=14)
+    plt.ylabel('Agent-Model Combinations (sorted by trial count, descending)', fontsize=14)
     
     # Rotate x-axis labels for better readability
     plt.xticks(rotation=90, ha='right', fontsize=8)
     plt.yticks(fontsize=9)
-    
-    # Adjust layout
-    plt.tight_layout()
-    
-    # Save the figure
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"Trial count heatmap saved to: {output_path}")
+
+    # Save the figure with padding
+    saved_paths = save_figure_in_formats(
+        output_base_path,
+        output_formats,
+        dpi=300,
+        bbox_inches='tight',
+        pad_inches=0.2
+    )
+    for path in saved_paths:
+        print(f"Trial count heatmap saved to: {path}")
     
     # Print insights
     print("\nTrial Count Insights:")
@@ -436,6 +477,11 @@ def main():
                         'with_timeouts' (completed + timeouts), \
                         'with_all_exceptions' (all), \
                         'only_timeouts' (only timeouts) (default: with_timeouts)")
+    parser.add_argument(
+        "--output-format",
+        default="svg",
+        help="Comma-separated list of output formats to generate (choices: png, svg, pdf; default: svg)"
+    )
     # Always produces two heatmaps:
     #   1. Agent x Model performance matrix
     #   2. Model x Task performance matrix
@@ -447,6 +493,25 @@ def main():
     agent_name = args.agent_name
     model_name = args.model_name
     trial_filter = args.trial_filter
+    raw_output_formats = [fmt.strip() for fmt in args.output_format.split(',')]
+    output_formats = [fmt.lower() for fmt in raw_output_formats if fmt]
+
+    if not output_formats:
+        parser.error("At least one valid output format must be provided via --output-format.")
+
+    allowed_formats = {"png", "svg", "pdf"}
+    invalid_formats = [fmt for fmt in output_formats if fmt not in allowed_formats]
+    if invalid_formats:
+        parser.error(f"Unsupported output format(s): {', '.join(invalid_formats)}")
+
+    # Remove duplicates while preserving order
+    seen_formats = set()
+    normalized_output_formats = []
+    for fmt in output_formats:
+        if fmt not in seen_formats:
+            normalized_output_formats.append(fmt)
+            seen_formats.add(fmt)
+    output_formats = tuple(normalized_output_formats)
     
     print("Terminal Bench Task Scores Heatmap Generator")
     print("=" * 80)
@@ -455,6 +520,7 @@ def main():
         print(f"Agent filter: {agent_name}")
     if model_name:
         print(f"Model filter: {model_name}")
+    print(f"Output formats: {', '.join(output_formats)}")
     print("=" * 80)
     
     # Connect to database
@@ -490,30 +556,57 @@ def main():
             filename_suffix = filter_suffix_map.get(trial_filter, f"_{trial_filter}")
             
             # 1. Create model x agent heatmap (transposed)
-            model_agent_path = output_dir / f"model_agent_performance{filename_suffix}.png"
-            create_agent_model_heatmap(df, model_agent_path, trial_filter)
+            model_agent_base_path = output_dir / f"model_agent_performance{filename_suffix}"
+            create_agent_model_heatmap(
+                df,
+                model_agent_base_path,
+                trial_filter,
+                output_formats=output_formats
+            )
             
             # 2. Create task x model heatmap (transposed, aggregated across all agents)
-            task_model_path = output_dir / f"task_model_performance{filename_suffix}.png"
-            create_model_task_heatmap(df, task_model_path, trial_filter)
+            task_model_base_path = output_dir / f"task_model_performance{filename_suffix}"
+            create_model_task_heatmap(
+                df,
+                task_model_base_path,
+                trial_filter,
+                output_formats=output_formats
+            )
             
             # 3. Create individual task x model heatmaps for each agent (transposed)
             if not agent_name:  # Only create per-agent heatmaps if no specific agent was requested
                 unique_agents = df['agent_name'].unique()
                 print(f"\nCreating individual task-model heatmaps for {len(unique_agents)} agents...")
                 for agent in sorted(unique_agents):
-                    agent_task_model_path = output_dir / f"task_model_performance_{agent}{filename_suffix}.png"
+                    agent_task_model_base = output_dir / f"task_model_performance_{agent}{filename_suffix}"
                     print(f"  - Creating heatmap for {agent}...")
-                    create_model_task_heatmap(df, agent_task_model_path, trial_filter, specific_agent=agent)
+                    create_model_task_heatmap(
+                        df,
+                        agent_task_model_base,
+                        trial_filter,
+                        specific_agent=agent,
+                        output_formats=output_formats
+                    )
             elif agent_name:
                 # If specific agent requested, also create that agent's individual heatmap
-                agent_task_model_path = output_dir / f"task_model_performance_{agent_name}{filename_suffix}.png"
+                agent_task_model_base = output_dir / f"task_model_performance_{agent_name}{filename_suffix}"
                 print(f"\nCreating individual task-model heatmap for {agent_name}...")
-                create_model_task_heatmap(df, agent_task_model_path, trial_filter, specific_agent=agent_name)
+                create_model_task_heatmap(
+                    df,
+                    agent_task_model_base,
+                    trial_filter,
+                    specific_agent=agent_name,
+                    output_formats=output_formats
+                )
             
             # 4. Create trial count heatmap
-            trial_count_path = output_dir / f"trial_counts{filename_suffix}.png"
-            create_trial_count_heatmap(df, trial_count_path, trial_filter)
+            trial_count_base_path = output_dir / f"trial_counts{filename_suffix}"
+            create_trial_count_heatmap(
+                df,
+                trial_count_base_path,
+                trial_filter,
+                output_formats=output_formats
+            )
             
             print("\n" + "="*80)
             print("Heatmap generation complete!")
